@@ -13,5 +13,4 @@ venv/
 .coverage
 htmlcov/
 
-*_fixed.fit
-*_fixed_*.fit
+*.fit
