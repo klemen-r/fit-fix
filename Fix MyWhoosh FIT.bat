@@ -1,7 +1,7 @@
 @echo off
 setlocal
 set "SCRIPT=%~dp0fix_fit.py"
-set "ARGS=--mimic-garmin"
+set "ARGS=--mimic-garmin --inject-metrics"
 
 where pyw >nul 2>nul
 if %ERRORLEVEL% == 0 (

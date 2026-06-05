@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import struct
 import sys
@@ -12,7 +13,7 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import NamedTuple, Optional, Sequence
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 FIT_EPOCH = datetime(1989, 12, 31, tzinfo=timezone.utc)
 FIT_SIGNATURE = b".FIT"
@@ -24,6 +25,8 @@ MSG_FILE_ID = 0
 MSG_SESSION = 18
 MSG_DEVICE_INFO = 23
 MSG_ACTIVITY = 34
+MSG_FILE_CREATOR = 49
+MSG_RECORD = 20
 
 F_TIMESTAMP = 253
 F_SESSION_START_TIME = 2
@@ -31,6 +34,9 @@ F_SESSION_TOTAL_ELAPSED = 7
 F_SESSION_TOTAL_TIMER = 8
 F_SESSION_SPORT = 5
 F_SESSION_SUB_SPORT = 6
+F_SESSION_NORMALIZED_POWER = 34
+F_SESSION_TSS = 35
+F_SESSION_IF = 36
 F_ACTIVITY_LOCAL_TS = 5
 F_FILE_ID_MANUFACTURER = 1
 F_FILE_ID_PRODUCT = 2
@@ -39,6 +45,9 @@ F_DEVICE_INDEX = 0
 F_DEVICE_MANUFACTURER = 2
 F_DEVICE_PRODUCT = 4
 F_DEVICE_PRODUCT_NAME = 27
+F_FILE_CREATOR_SOFTWARE_VERSION = 0
+F_RECORD_HEART_RATE = 3
+F_RECORD_POWER = 7
 
 BT_UINT8 = 0x02
 BT_ENUM = 0x00
@@ -50,10 +59,13 @@ ZWIFT_MANUFACTURER = 260
 MYWHOOSH_MANUFACTURER = 331
 GARMIN_MANUFACTURER = 1
 EDGE_530_PRODUCT = 3121
+EDGE_530_SOFTWARE_VERSION = 1140
 SPORT_CYCLING = 2
 SUB_SPORT_VIRTUAL_ACTIVITY = 58
 
-_INTERESTING = frozenset({MSG_FILE_ID, MSG_SESSION, MSG_DEVICE_INFO, MSG_ACTIVITY})
+NP_WINDOW_SECONDS = 30
+
+_INTERESTING = frozenset({MSG_FILE_ID, MSG_SESSION, MSG_DEVICE_INFO, MSG_ACTIVITY, MSG_FILE_CREATOR})
 
 
 def _crc_table() -> tuple[int, ...]:
@@ -380,12 +392,268 @@ def _add_creator_device(
     return new_body_end
 
 
+@dataclass
+class _DefRange:
+    local_mt: int
+    global_num: int
+    start: int
+    end: int
+    field_count_pos: int
+    field_descriptors_end: int
+    record_size: int
+    fields: tuple
+    endian: str
+
+
+@dataclass
+class _DataRange:
+    local_mt: int
+    global_num: int
+    start: int
+    end: int
+    regular_end: int
+    endian: str
+    offsets: dict
+
+
+def _walk_detailed(buf) -> tuple[list[_DefRange], list[_DataRange], int, int]:
+    if len(buf) < 14:
+        raise FitError(f"file too small ({len(buf)} bytes)")
+    header_size = buf[0]
+    if header_size not in (12, 14):
+        raise FitError(f"invalid header size {header_size}")
+    if buf[8:12] != FIT_SIGNATURE:
+        raise FitError("missing .FIT signature")
+    data_size = struct.unpack_from("<I", buf, 4)[0]
+    body_end = header_size + data_size
+    if body_end + 2 > len(buf):
+        raise FitError(f"truncated file: needs {body_end + 2} bytes, has {len(buf)}")
+
+    defs_by_local: dict[int, _DefRange] = {}
+    defs: list[_DefRange] = []
+    datas: list[_DataRange] = []
+    pos = header_size
+
+    while pos < body_end:
+        msg_start = pos
+        hdr = buf[pos]
+        pos += 1
+        if hdr & 0x80:
+            local_mt = (hdr >> 5) & 0x03
+            d = defs_by_local.get(local_mt)
+            if d is None:
+                raise FitError(f"compressed-ts data without def at {pos - 1}")
+            data_end = pos + d.record_size
+            if data_end > body_end:
+                raise FitError(f"truncated compressed-ts data at {pos - 1}")
+            offs: dict = {}
+            o = pos
+            for fnum, fsz, ftype in d.fields:
+                offs[fnum] = (o, fsz, ftype)
+                o += fsz
+            datas.append(_DataRange(local_mt, d.global_num, msg_start, data_end, data_end, d.endian, offs))
+            pos = data_end
+            continue
+
+        local_mt = hdr & 0x0F
+        is_def = bool(hdr & 0x40)
+        has_dev = bool(hdr & 0x20)
+        if is_def:
+            if pos + 5 > body_end:
+                raise FitError(f"truncated definition at {pos - 1}")
+            pos += 1
+            arch = buf[pos]
+            pos += 1
+            if arch not in (0, 1):
+                raise FitError(f"invalid architecture byte 0x{arch:02x}")
+            endian = "<" if arch == 0 else ">"
+            global_num = struct.unpack_from(endian + "H", buf, pos)[0]
+            pos += 2
+            field_count_pos = pos
+            n = buf[pos]
+            pos += 1
+            if pos + n * 3 > body_end:
+                raise FitError(f"truncated field list at {pos}")
+            fields_list = []
+            total_regular = 0
+            for _ in range(n):
+                fnum, fsz, ftype = buf[pos], buf[pos + 1], buf[pos + 2]
+                fields_list.append((fnum, fsz, ftype & 0x1F))
+                total_regular += fsz
+                pos += 3
+            field_descriptors_end = pos
+            total_total = total_regular
+            if has_dev:
+                if pos >= body_end:
+                    raise FitError(f"truncated dev field count at {pos}")
+                nd = buf[pos]
+                pos += 1
+                if pos + nd * 3 > body_end:
+                    raise FitError(f"truncated dev field list at {pos}")
+                for _ in range(nd):
+                    total_total += buf[pos + 1]
+                    pos += 3
+            d = _DefRange(
+                local_mt=local_mt,
+                global_num=global_num,
+                start=msg_start,
+                end=pos,
+                field_count_pos=field_count_pos,
+                field_descriptors_end=field_descriptors_end,
+                record_size=total_total,
+                fields=tuple(fields_list),
+                endian=endian,
+            )
+            defs_by_local[local_mt] = d
+            defs.append(d)
+        else:
+            d = defs_by_local.get(local_mt)
+            if d is None:
+                raise FitError(f"data without def (local_mt={local_mt}) at {pos - 1}")
+            data_end = pos + d.record_size
+            if data_end > body_end:
+                raise FitError(f"truncated data at {pos - 1}")
+            offs = {}
+            o = pos
+            regular_size = sum(sz for _, sz, _ in d.fields)
+            for fnum, fsz, ftype in d.fields:
+                offs[fnum] = (o, fsz, ftype)
+                o += fsz
+            datas.append(
+                _DataRange(local_mt, d.global_num, msg_start, data_end, pos + regular_size, d.endian, offs)
+            )
+            pos = data_end
+
+    if pos != body_end:
+        raise FitError(f"body parser stopped at {pos}, expected {body_end}")
+    return defs, datas, body_end, header_size
+
+
+def _read_record_series(datas: list[_DataRange], buf) -> tuple[list[int], list[int]]:
+    times: list[int] = []
+    powers: list[int] = []
+    for d in datas:
+        if d.global_num != MSG_RECORD:
+            continue
+        ts_off = d.offsets.get(F_TIMESTAMP)
+        if not ts_off or ts_off[1] != 4 or ts_off[2] != BT_UINT32:
+            continue
+        t = _u32(buf, ts_off[0], d.endian)
+        if t in (0, U32_INVALID):
+            continue
+        times.append(t)
+        pwr_off = d.offsets.get(F_RECORD_POWER)
+        if pwr_off and pwr_off[1] == 2 and pwr_off[2] == BT_UINT16:
+            p = struct.unpack_from(d.endian + "H", buf, pwr_off[0])[0]
+            powers.append(0 if p == 0xFFFF else p)
+        else:
+            powers.append(0)
+    return times, powers
+
+
+def _normalized_power(power: list[int], window: int = NP_WINDOW_SECONDS) -> float:
+    if not power:
+        return 0.0
+    if len(power) < window:
+        return sum(power) / len(power)
+    s = sum(power[:window])
+    rolling = [s / window]
+    for i in range(window, len(power)):
+        s += power[i] - power[i - window]
+        rolling.append(s / window)
+    fourth = [r ** 4 for r in rolling]
+    return (sum(fourth) / len(fourth)) ** 0.25
+
+
+def _compute_metrics(
+    times: list[int],
+    powers: list[int],
+    ftp: int,
+) -> dict:
+    if not times or ftp <= 0 or not any(p > 0 for p in powers):
+        return {"np": 0, "if": 0.0, "tss": 0.0}
+    duration_sec = max(1, times[-1] - times[0])
+    np_value = _normalized_power(powers)
+    if_value = np_value / ftp
+    tss = (duration_sec * np_value * if_value) / (ftp * 3600) * 100
+    return {
+        "np": min(65535, max(0, int(round(np_value)))),
+        "if": min(65.535, max(0.0, if_value)),
+        "tss": min(6553.5, max(0.0, tss)),
+    }
+
+
+def _splice_session_metrics(
+    buf: bytearray,
+    defs: list[_DefRange],
+    datas: list[_DataRange],
+    body_end: int,
+    header_size: int,
+    metrics: dict,
+) -> tuple[bytes, int]:
+    sessions_def = [d for d in defs if d.global_num == MSG_SESSION]
+    sessions_data = [d for d in datas if d.global_num == MSG_SESSION]
+    if len(sessions_def) != 1 or len(sessions_data) != 1:
+        raise FitError(
+            f"expected 1 session def + 1 session data, got {len(sessions_def)} + {len(sessions_data)}"
+        )
+    sdef = sessions_def[0]
+    sdata = sessions_data[0]
+    if sdef.start > sdata.start:
+        raise FitError("session data appears before session definition")
+
+    existing = {f[0] for f in sdef.fields}
+    spec = [
+        (F_SESSION_NORMALIZED_POWER, 2, 0x84, metrics["np"]),
+        (F_SESSION_TSS, 2, 0x84, int(round(metrics["tss"] * 10))),
+        (F_SESSION_IF, 2, 0x84, int(round(metrics["if"] * 1000))),
+    ]
+    to_add = [t for t in spec if t[0] not in existing]
+    if not to_add:
+        return bytes(buf), 0
+
+    new_def = bytearray(buf[sdef.start:sdef.end])
+    new_def[sdef.field_count_pos - sdef.start] += len(to_add)
+    desc = b"".join(struct.pack("BBB", f, sz, bt) for (f, sz, bt, _) in to_add)
+    new_def[sdef.field_descriptors_end - sdef.start:sdef.field_descriptors_end - sdef.start] = desc
+
+    new_data = bytearray(buf[sdata.start:sdata.end])
+    val_bytes = b""
+    endian = sdata.endian
+    for (_, sz, _, v) in to_add:
+        v = max(0, min(int(v), (1 << (sz * 8)) - 1))
+        if sz == 1:
+            val_bytes += struct.pack(endian + "B", v)
+        elif sz == 2:
+            val_bytes += struct.pack(endian + "H", v)
+        else:
+            val_bytes += struct.pack(endian + "I", v)
+    new_data[sdata.regular_end - sdata.start:sdata.regular_end - sdata.start] = val_bytes
+
+    new_body = (
+        bytes(buf[header_size:sdef.start])
+        + bytes(new_def)
+        + bytes(buf[sdef.end:sdata.start])
+        + bytes(new_data)
+        + bytes(buf[sdata.end:body_end])
+    )
+
+    new_header = bytearray(buf[:header_size])
+    struct.pack_into("<I", new_header, 4, len(new_body))
+    if header_size == 14 and struct.unpack_from("<H", new_header, 12)[0]:
+        struct.pack_into("<H", new_header, 12, fit_crc(memoryview(new_header)[:12]))
+    pre_crc = bytes(new_header) + new_body
+    return pre_crc + struct.pack("<H", fit_crc(pre_crc)), len(to_add)
+
+
 def fix_fit_bytes(
     data: bytes,
     tz: Optional[tzinfo] = None,
     *,
     mimic_zwift: bool = False,
     mimic_garmin: bool = False,
+    inject_metrics: bool = False,
+    ftp: Optional[int] = None,
 ) -> tuple[bytes, FixReport]:
     if mimic_zwift and mimic_garmin:
         raise FitError("--mimic-zwift and --mimic-garmin cannot be used together")
@@ -396,6 +664,7 @@ def fix_fit_bytes(
     sessions = [m for m in msgs if m.global_num == MSG_SESSION]
     device_infos = [m for m in msgs if m.global_num == MSG_DEVICE_INFO]
     activities = [m for m in msgs if m.global_num == MSG_ACTIVITY]
+    file_creators = [m for m in msgs if m.global_num == MSG_FILE_CREATOR]
     if not sessions:
         raise FitError("no session message")
     if not activities:
@@ -481,6 +750,10 @@ def fix_fit_bytes(
                         buf, device, F_DEVICE_PRODUCT, target_product
                     )
 
+        if mimic_garmin:
+            for fc in file_creators:
+                patches += _set_u16(buf, fc, F_FILE_CREATOR_SOFTWARE_VERSION, EDGE_530_SOFTWARE_VERSION)
+
         if add_creator_at is not None and not has_creator:
             local_mt = next((i for i in range(16) if i not in used_local), None)
             if local_mt is None:
@@ -498,7 +771,21 @@ def fix_fit_bytes(
             )
             messages_added = 1
 
-    if patches and not messages_added:
+    inject_patches = 0
+    if inject_metrics:
+        if ftp is None or ftp <= 0:
+            raise FitError("inject_metrics requires ftp (in watts)")
+        if patches or messages_added:
+            struct.pack_into("<H", buf, body_end, fit_crc(memoryview(buf)[:body_end]))
+        defs_d, datas_d, body_end_d, header_size_d = _walk_detailed(buf)
+        times, powers = _read_record_series(datas_d, buf)
+        metrics = _compute_metrics(times, powers, ftp)
+        spliced, inject_patches = _splice_session_metrics(
+            buf, defs_d, datas_d, body_end_d, header_size_d, metrics
+        )
+        patches += inject_patches
+        out = spliced
+    elif patches and not messages_added:
         struct.pack_into("<H", buf, body_end, fit_crc(memoryview(buf)[:body_end]))
         out = bytes(buf)
     elif messages_added:
@@ -570,6 +857,8 @@ def fix_fit(
     write_when_unchanged: bool = False,
     mimic_zwift: bool = False,
     mimic_garmin: bool = False,
+    inject_metrics: bool = False,
+    ftp: Optional[int] = None,
 ) -> FixReport:
     src = Path(input_path)
     if not src.is_file():
@@ -581,6 +870,8 @@ def fix_fit(
         tz=tz,
         mimic_zwift=mimic_zwift,
         mimic_garmin=mimic_garmin,
+        inject_metrics=inject_metrics,
+        ftp=ftp,
     )
     report.input_path = src
     if report.was_already_correct and not write_when_unchanged and output_path is None:
@@ -611,6 +902,53 @@ def _format_report(r: FixReport) -> str:
         f"      fields patched: {r.fields_patched}\n"
         f"      messages added: {r.messages_added}"
     )
+
+
+def _config_path() -> Path:
+    return Path(__file__).resolve().parent / "fit-fix.cfg"
+
+
+def _load_config() -> dict:
+    path = _config_path()
+    if not path.is_file():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _save_config(data: dict) -> None:
+    try:
+        _config_path().write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _gui_prompt_ftp() -> Optional[int]:
+    try:
+        import tkinter as tk
+        from tkinter import simpledialog
+    except Exception:
+        return None
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        root.attributes("-topmost", True)
+        return simpledialog.askinteger(
+            "fit-fix setup",
+            "Your FTP in watts\n(Garmin Connect: User Settings -> Power Zones):",
+            minvalue=50,
+            maxvalue=600,
+            parent=root,
+        )
+    except Exception:
+        return None
+    finally:
+        try:
+            root.destroy()
+        except Exception:
+            pass
 
 
 def _has_console() -> bool:
@@ -682,6 +1020,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    help="rewrite MyWhoosh file_id as Zwift (260)")
     p.add_argument("--mimic-garmin", action="store_true",
                    help="rewrite virtual MyWhoosh creator as Garmin Edge 530")
+    p.add_argument("--inject-metrics", action="store_true",
+                   help="compute and write Normalized Power, IF, TSS into the session")
+    p.add_argument("--ftp", type=int, default=None,
+                   help="FTP in watts (required for --inject-metrics; prompts via GUI if unset)")
     p.add_argument("--no-gui", action="store_true", help="never show popups")
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return p
@@ -744,6 +1086,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(msg, file=sys.stderr)
         return 2
 
+    ftp = args.ftp
+    if args.inject_metrics and ftp is None:
+        ftp = _load_config().get("ftp")
+        if ftp is None and use_gui:
+            ftp = _gui_prompt_ftp()
+            if ftp is not None:
+                _save_config({"ftp": int(ftp)})
+        if ftp is None:
+            msg = "--inject-metrics needs --ftp (or set it once via the GUI prompt)"
+            if use_gui:
+                _gui_notify(False, msg)
+            elif sys.stderr is not None:
+                print(msg, file=sys.stderr)
+            return 2
+
     tz = timezone.utc if args.utc else None
     lines: list[str] = []
     ok = True
@@ -758,6 +1115,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 write_when_unchanged=args.write_when_unchanged,
                 mimic_zwift=args.mimic_zwift,
                 mimic_garmin=args.mimic_garmin,
+                inject_metrics=args.inject_metrics,
+                ftp=ftp,
             )
             lines.append(_format_report(r))
         except Exception as e:

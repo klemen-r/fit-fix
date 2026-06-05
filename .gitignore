@@ -14,3 +14,4 @@ venv/
 htmlcov/
 
 *.fit
+fit-fix.cfg

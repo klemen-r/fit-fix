@@ -1003,3 +1003,46 @@ def test_atomic_write_keeps_original_on_failure(tmp_path: Path, monkeypatch) -> 
     assert existing.read_bytes() == b"original-content"
     leftovers = [p.name for p in tmp_path.iterdir() if p.suffix == ".tmp"]
     assert leftovers == []
+
+
+def test_normalized_power_constant_input() -> None:
+    from fix_fit import _normalized_power
+
+    assert _normalized_power([200] * 600) == pytest.approx(200.0)
+    assert _normalized_power([0] * 30) == 0.0
+    assert _normalized_power([]) == 0.0
+
+
+def test_normalized_power_short_series_uses_average() -> None:
+    from fix_fit import _normalized_power
+
+    assert _normalized_power([100, 200, 300]) == pytest.approx(200.0)
+
+
+def test_compute_metrics_with_power_produces_coggan_values() -> None:
+    from fix_fit import _compute_metrics
+
+    times = list(range(3600))
+    powers = [200] * 3600
+    m = _compute_metrics(times, powers, ftp=250)
+    assert m["np"] == 200
+    assert m["if"] == pytest.approx(0.8, abs=0.01)
+    assert m["tss"] == pytest.approx(64.0, abs=1.0)
+
+
+def test_compute_metrics_no_power_returns_zeros() -> None:
+    from fix_fit import _compute_metrics
+
+    assert _compute_metrics([], [], ftp=250) == {"np": 0, "if": 0.0, "tss": 0.0}
+    assert _compute_metrics(list(range(60)), [0] * 60, ftp=250) == {"np": 0, "if": 0.0, "tss": 0.0}
+
+
+def test_compute_metrics_requires_positive_ftp() -> None:
+    from fix_fit import _compute_metrics
+
+    assert _compute_metrics(list(range(60)), [200] * 60, ftp=0) == {"np": 0, "if": 0.0, "tss": 0.0}
+
+
+def test_inject_metrics_without_ftp_raises() -> None:
+    with pytest.raises(FitError, match="ftp"):
+        fix_fit_bytes(_broken_mywhoosh_bytes(), inject_metrics=True)
