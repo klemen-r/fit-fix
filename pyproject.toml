@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fit-fix"
+version = "1.3.0"
+description = "Repair MyWhoosh FIT timestamps for Garmin Connect"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+authors = [{ name = "not_kler" }]
+keywords = ["fit", "garmin", "mywhoosh", "zwift", "cycling"]
+classifiers = [
+    "Environment :: Console",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+]
+
+[project.urls]
+Homepage = "https://github.com/klemen-r/fit-fix"
+Issues = "https://github.com/klemen-r/fit-fix/issues"
+
+[project.scripts]
+fit-fix = "fix_fit:main"
+
+[project.optional-dependencies]
+dev = [
+    "build",
+    "mypy",
+    "pytest",
+    "ruff",
+    "twine",
+]
+
+[tool.setuptools]
+py-modules = ["fix_fit"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
