@@ -793,15 +793,37 @@ def _parse_creator_device(buf: bytes) -> tuple[int, int, int]:
     )
 
 
-def _parse_creator_name(buf: bytes) -> str | None:
-    from fix_fit import F_DEVICE_PRODUCT_NAME, MSG_DEVICE_INFO, _walk
+def _parse_creator_fields(buf: bytes) -> dict:
+    from fix_fit import (
+        F_DEVICE_INDEX,
+        F_DEVICE_MANUFACTURER,
+        F_DEVICE_PRODUCT,
+        F_DEVICE_SERIAL,
+        F_DEVICE_SOFTWARE_VERSION,
+        F_DEVICE_SOURCE_TYPE,
+        F_TIMESTAMP,
+        MSG_DEVICE_INFO,
+        _walk,
+    )
 
     msgs, _, _, _ = _walk(buf)
     device = next(m for m in msgs if m.global_num == MSG_DEVICE_INFO)
-    field = device.offsets.get(F_DEVICE_PRODUCT_NAME)
-    if field is None:
-        return None
-    return buf[field[0]:field[0] + field[1]].split(b"\0", 1)[0].decode("ascii")
+    out: dict = {}
+    for label, fnum, fmt in [
+        ("timestamp", F_TIMESTAMP, "I"),
+        ("serial_number", F_DEVICE_SERIAL, "I"),
+        ("manufacturer", F_DEVICE_MANUFACTURER, "H"),
+        ("product", F_DEVICE_PRODUCT, "H"),
+        ("software_version", F_DEVICE_SOFTWARE_VERSION, "H"),
+        ("device_index", F_DEVICE_INDEX, "B"),
+        ("source_type", F_DEVICE_SOURCE_TYPE, "B"),
+    ]:
+        f = device.offsets.get(fnum)
+        if f is None:
+            out[label] = None
+            continue
+        out[label] = struct.unpack_from(device.endian + fmt, buf, f[0])[0]
+    return out
 
 
 def test_mimic_zwift_patches_file_id() -> None:
@@ -818,7 +840,13 @@ def test_mimic_zwift_patches_file_id() -> None:
     assert report.messages_added == 1
     assert _parse_file_id(fixed) == (260, 0, 0)
     assert _parse_creator_device(fixed) == (0, 260, 0)
-    assert _parse_creator_name(fixed) == "Zwift"
+    creator = _parse_creator_fields(fixed)
+    assert creator["manufacturer"] == 260
+    assert creator["product"] == 0
+    assert creator["device_index"] == 0
+    assert creator["source_type"] == 5
+    assert creator["serial_number"] == 0
+    assert creator["software_version"] == 0xFFFF
     assert fit_crc(fixed[:12]) == struct.unpack_from("<H", fixed, 12)[0]
     assert fit_crc(fixed[:-2]) == struct.unpack_from("<H", fixed, len(fixed) - 2)[0]
 
@@ -948,7 +976,7 @@ def test_mimic_zwift_combined_with_timestamp_fix() -> None:
     assert _parse_file_id(fixed) == (260, 0, 0)
 
 
-def test_mimic_garmin_patches_creator_as_edge_530() -> None:
+def test_mimic_garmin_minimal_only_patches_file_id_and_timestamps() -> None:
     src = _make_fit(
         session_start=SESSION_START,
         session_elapsed_ms=ELAPSED_MS,
@@ -959,10 +987,31 @@ def test_mimic_garmin_patches_creator_as_edge_530() -> None:
     )
     fixed, report = fix_fit_bytes(src, mimic_garmin=True)
     assert report.fields_patched == 5
+    assert report.messages_added == 0
+    assert _parse_file_id(fixed) == (1, 4440, 3313379353)
+
+
+def test_garmin_edge_530_full_profile_inserts_creator_device_info() -> None:
+    src = _make_fit(
+        session_start=SESSION_START,
+        session_elapsed_ms=ELAPSED_MS,
+        session_ts=SESSION_START,
+        activity_ts=SESSION_START,
+        activity_local_ts=UNIX_LOCAL_TS,
+        file_id=(331, 3570, 3313379353),
+    )
+    fixed, report = fix_fit_bytes(src, profile="garmin-edge-530-full")
     assert report.messages_added == 1
     assert _parse_file_id(fixed) == (1, 3121, 3313379353)
     assert _parse_creator_device(fixed) == (0, 1, 3121)
-    assert _parse_creator_name(fixed) == "Edge 530"
+    creator = _parse_creator_fields(fixed)
+    assert creator["manufacturer"] == 1
+    assert creator["product"] == 3121
+    assert creator["device_index"] == 0
+    assert creator["source_type"] == 5
+    assert creator["serial_number"] == 3313379353
+    assert creator["software_version"] == 1140
+    assert creator["timestamp"] == SESSION_START
 
 
 def _patch_session_sport(src_bytes: bytes, sport: int, sub_sport: int) -> bytes:

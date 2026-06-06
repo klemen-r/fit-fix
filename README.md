@@ -41,12 +41,15 @@ Profiles available:
 
 | Profile | manufacturer | product | Notes |
 |---|---|---|---|
-| `garmin-edge` | garmin (1) | 3121 (Edge 530) | Patches `file_creator.software_version` to 1140. Cycling/virtual_activity only. |
-| `garmin-edge-1030` | garmin (1) | 3570 (Edge 1030 Plus) | Cycling/virtual_activity only. |
-| `garmin-forerunner` | garmin (1) | 4257 (Forerunner 265) | Cycling/virtual_activity only. |
-| `zwift` | zwift (260) | 0 | Clears serial. |
-| `rouvy` | rouvy (267) | 0 | Clears serial. |
-| `tacx` | tacx (89) | 0 | Clears serial. |
+| `garmin-edge` | garmin (1) | 4440 (Edge 1050) | **Minimal**: patches only `file_id` and timestamps; no creator `device_info`; no `file_creator` rewrite. Matches the structural fingerprint of a known-working spoof. Cycling only. |
+| `garmin-edge-530-full` | garmin (1) | 3121 (Edge 530) | Heavy: also inserts a creator `device_info` (timestamp, serial, software_version, source_type=local) and patches `file_creator.software_version` to 1140. Use this if you want to test whether the extra structure helps or hurts. Cycling only. |
+| `garmin-edge-1030` | garmin (1) | 3570 (Edge 1030 Plus) | Cycling only. |
+| `garmin-forerunner` | garmin (1) | 4257 (Forerunner 265) | Cycling only. |
+| `zwift` | zwift (260) | 0 | Clears serial. Inserts creator `device_info`. |
+| `rouvy` | rouvy (267) | 0 | Clears serial. Inserts creator `device_info`. |
+| `tacx` | tacx (89) | 0 | Clears serial. Inserts creator `device_info`. |
+
+**Empirical note on `garmin-edge`**: a reference FIT file confirmed to be accepted by Garmin Connect changed only `file_id.manufacturer` (to garmin/1) and `file_id.product` (to 4440, likely Edge 1050). It left timestamps broken (year 2046 local_timestamp), did not insert a creator `device_info`, and did not touch `file_creator.software_version`. The `garmin-edge` profile now matches that structural fingerprint, plus our timestamp repair as good hygiene.
 
 The Garmin-cycling profiles accept any file whose `session.sport` is already cycling, regardless of `sub_sport` (so cycling/virtual_activity, cycling/indoor_cycling, cycling/generic all pass through). They refuse files whose sport is missing or non-cycling (running, swimming, etc.) unless you pass `--force-cycling` explicitly. This guard exists so you cannot accidentally relabel a run or a swim as a ride.
 

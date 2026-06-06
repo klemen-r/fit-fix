@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import NamedTuple, Optional, Sequence
 
-__version__ = "2.0.1"
+__version__ = "2.0.2"
 
 FIT_EPOCH = datetime(1989, 12, 31, tzinfo=timezone.utc)
 FIT_SIGNATURE = b".FIT"
@@ -42,9 +42,14 @@ F_FILE_ID_MANUFACTURER = 1
 F_FILE_ID_PRODUCT = 2
 F_FILE_ID_SERIAL = 3
 F_DEVICE_INDEX = 0
+F_DEVICE_SERIAL = 3
 F_DEVICE_MANUFACTURER = 2
 F_DEVICE_PRODUCT = 4
+F_DEVICE_SOFTWARE_VERSION = 5
+F_DEVICE_SOURCE_TYPE = 25
 F_DEVICE_PRODUCT_NAME = 27
+
+SOURCE_TYPE_LOCAL = 5
 F_FILE_CREATOR_SOFTWARE_VERSION = 0
 F_RECORD_POSITION_LAT = 0
 F_RECORD_POSITION_LONG = 1
@@ -90,6 +95,7 @@ WAHOO_MANUFACTURER = 32
 
 EDGE_530_PRODUCT = 3121
 EDGE_1030_PLUS_PRODUCT = 3570
+EDGE_1050_PRODUCT = 4440
 FR_265_PRODUCT = 4257
 EDGE_530_SOFTWARE_VERSION = 1140
 
@@ -132,6 +138,15 @@ class Profile:
 PROFILES: dict[str, Profile] = {
     "garmin-edge": Profile(
         name="garmin-edge",
+        manufacturer=GARMIN_MANUFACTURER,
+        product=EDGE_1050_PRODUCT,
+        product_name="Edge 1050",
+        software_version=0,
+        clear_serial=False,
+        add_creator_device_info=False,
+    ),
+    "garmin-edge-530-full": Profile(
+        name="garmin-edge-530-full",
         manufacturer=GARMIN_MANUFACTURER,
         product=EDGE_530_PRODUCT,
         product_name="Edge 530",
@@ -461,35 +476,40 @@ def _creator_device_info_record(
     local_mt: int,
     manufacturer: int,
     product: int,
-    product_name: str,
+    software_version: int,
+    serial_number: int,
+    timestamp: int,
 ) -> bytes:
-    encoded_name = product_name.encode("ascii") + b"\0"
-    if len(encoded_name) > 255:
-        raise FitError("creator product name is too long")
-    return bytes(
+    sw_raw = software_version if software_version > 0 else 0xFFFF
+    definition = bytes(
         [
             0x40 | local_mt,
             0,
             0,
             MSG_DEVICE_INFO,
             0,
-            4,
-            F_DEVICE_INDEX,
-            1,
-            0x02,
-            F_DEVICE_MANUFACTURER,
-            2,
-            0x84,
-            F_DEVICE_PRODUCT,
-            2,
-            0x84,
-            F_DEVICE_PRODUCT_NAME,
-            len(encoded_name),
-            0x07,
-            local_mt,
-            0,
+            7,
+            F_TIMESTAMP, 4, 0x86,
+            F_DEVICE_SERIAL, 4, 0x8C,
+            F_DEVICE_MANUFACTURER, 2, 0x84,
+            F_DEVICE_PRODUCT, 2, 0x84,
+            F_DEVICE_SOFTWARE_VERSION, 2, 0x84,
+            F_DEVICE_INDEX, 1, 0x02,
+            F_DEVICE_SOURCE_TYPE, 1, 0x00,
         ]
-    ) + struct.pack("<HH", manufacturer, product) + encoded_name
+    )
+    data = struct.pack(
+        "<BIIHHHBB",
+        local_mt,
+        timestamp & 0xFFFFFFFF,
+        serial_number & 0xFFFFFFFF,
+        manufacturer & 0xFFFF,
+        product & 0xFFFF,
+        sw_raw & 0xFFFF,
+        0,
+        SOURCE_TYPE_LOCAL,
+    )
+    return definition + data
 
 
 def _add_creator_device(
@@ -500,10 +520,12 @@ def _add_creator_device(
     local_mt: int,
     manufacturer: int,
     product: int,
-    product_name: str,
+    software_version: int,
+    serial_number: int,
+    timestamp: int,
 ) -> int:
     record = _creator_device_info_record(
-        local_mt, manufacturer, product, product_name
+        local_mt, manufacturer, product, software_version, serial_number, timestamp
     )
     buf[insert_at:insert_at] = record
     new_body_end = body_end + len(record)
@@ -904,11 +926,18 @@ def fix_fit_bytes(
         if profile_obj.add_creator_device_info:
             pass  # handled below by add_creator_at logic
 
-        if add_creator_at is not None and not has_creator:
+        if add_creator_at is not None and not has_creator and profile_obj.add_creator_device_info:
             local_mt = next((i for i in range(16) if i not in used_local), None)
             if local_mt is None:
                 local_mt = 15
                 add_creator_at = body_end
+            creator_serial = 0
+            if file_ids:
+                fi0 = file_ids[0]
+                serial_field = _field(fi0, F_FILE_ID_SERIAL, 4, BT_UINT32Z)
+                if serial_field:
+                    creator_serial = struct.unpack_from(fi0.endian + "I", buf, serial_field[0])[0]
+            creator_ts = anchors[0][0] if anchors else 0
             body_end = _add_creator_device(
                 buf,
                 add_creator_at,
@@ -917,7 +946,9 @@ def fix_fit_bytes(
                 local_mt,
                 target_manufacturer,
                 target_product,
-                target_name,
+                profile_obj.software_version,
+                creator_serial,
+                creator_ts,
             )
             messages_added = 1
 
