@@ -965,22 +965,60 @@ def test_mimic_garmin_patches_creator_as_edge_530() -> None:
     assert _parse_creator_name(fixed) == "Edge 530"
 
 
-def test_mimic_garmin_rejects_non_virtual_activity() -> None:
-    src = bytearray(
-        _make_fit(
-            session_start=SESSION_START,
-            session_elapsed_ms=ELAPSED_MS,
-            session_ts=SESSION_START,
-            activity_ts=SESSION_START,
-            activity_local_ts=UNIX_LOCAL_TS,
-            file_id=(331, 3570, 3313379353),
-        )
-    )
+def _patch_session_sport(src_bytes: bytes, sport: int, sub_sport: int) -> bytes:
+    src = bytearray(src_bytes)
     session_data = src[0] + 24 + 21
-    src[session_data + 14] = 0
+    src[session_data + 13] = sport
+    src[session_data + 14] = sub_sport
     src[-2:] = struct.pack("<H", fit_crc(src[:-2]))
-    with pytest.raises(FitError, match="only accepts cycling / virtual_activity"):
-        fix_fit_bytes(bytes(src), mimic_garmin=True)
+    return bytes(src)
+
+
+def _base_synthetic_with_file_id() -> bytes:
+    return _make_fit(
+        session_start=SESSION_START,
+        session_elapsed_ms=ELAPSED_MS,
+        session_ts=SESSION_START,
+        activity_ts=SESSION_START,
+        activity_local_ts=UNIX_LOCAL_TS,
+        file_id=(331, 3570, 3313379353),
+    )
+
+
+def test_mimic_garmin_accepts_cycling_indoor_cycling() -> None:
+    src = _patch_session_sport(_base_synthetic_with_file_id(), sport=2, sub_sport=6)
+    fixed, report = fix_fit_bytes(src, mimic_garmin=True)
+    assert report.fields_patched > 0
+
+
+def test_mimic_garmin_accepts_cycling_virtual_activity() -> None:
+    src = _patch_session_sport(_base_synthetic_with_file_id(), sport=2, sub_sport=58)
+    fixed, report = fix_fit_bytes(src, mimic_garmin=True)
+    assert report.fields_patched > 0
+
+
+def test_mimic_garmin_accepts_cycling_generic_subsport() -> None:
+    src = _patch_session_sport(_base_synthetic_with_file_id(), sport=2, sub_sport=0)
+    fixed, report = fix_fit_bytes(src, mimic_garmin=True)
+    assert report.fields_patched > 0
+
+
+def test_mimic_garmin_rejects_running_without_force() -> None:
+    src = _patch_session_sport(_base_synthetic_with_file_id(), sport=1, sub_sport=0)
+    with pytest.raises(FitError, match="not cycling"):
+        fix_fit_bytes(src, mimic_garmin=True)
+
+
+def test_mimic_garmin_rejects_swimming_without_force() -> None:
+    src = _patch_session_sport(_base_synthetic_with_file_id(), sport=5, sub_sport=0)
+    with pytest.raises(FitError, match="not cycling"):
+        fix_fit_bytes(src, mimic_garmin=True)
+
+
+def test_mimic_garmin_accepts_running_with_force_cycling() -> None:
+    src = _patch_session_sport(_base_synthetic_with_file_id(), sport=1, sub_sport=0)
+    fixed, report = fix_fit_bytes(src, mimic_garmin=True, force_cycling=True)
+    assert report.fields_patched > 0
 
 
 def test_mimic_modes_are_mutually_exclusive() -> None:
@@ -1173,9 +1211,113 @@ def test_matrix_md_has_test_procedure(tmp_path: Path) -> None:
     out_dir = tmp_path / "v"
     build_test_matrix(src, out_dir)
     md = (out_dir / "test_matrix.md").read_text(encoding="utf-8")
-    assert "Manual Garmin Connect test procedure" in md
+    assert "Testing protocol" in md
     assert "Acute Load" in md
     assert "Recovery Time" in md
+
+
+def test_matrix_md_warns_one_at_a_time(tmp_path: Path) -> None:
+    from fix_fit import build_test_matrix
+
+    src = tmp_path / "ride.fit"
+    src.write_bytes(_broken_mywhoosh_bytes())
+    out_dir = tmp_path / "v"
+    build_test_matrix(src, out_dir)
+    md = (out_dir / "test_matrix.md").read_text(encoding="utf-8")
+    assert "ONLY ONE variant at a time" in md
+    assert "DO NOT upload all six variants together" in md
+
+
+def test_matrix_md_has_recommended_test_order(tmp_path: Path) -> None:
+    from fix_fit import build_test_matrix
+
+    src = tmp_path / "ride.fit"
+    src.write_bytes(_broken_mywhoosh_bytes())
+    out_dir = tmp_path / "v"
+    build_test_matrix(src, out_dir)
+    md = (out_dir / "test_matrix.md").read_text(encoding="utf-8")
+    assert "Recommended test order" in md
+    edge_idx = md.find("02_garmin_edge_indoor")
+    fr_idx = md.find("03_garmin_forerunner_indoor")
+    zwift_idx = md.find("04_zwift_virtual")
+    rouvy_idx = md.find("05_rouvy_virtual")
+    tacx_idx = md.find("06_tacx_indoor")
+    ts_idx = md.find("01_timestamp_fixed_only")
+    assert 0 < edge_idx < fr_idx < zwift_idx < rouvy_idx < tacx_idx < ts_idx
+
+
+def test_matrix_md_has_success_criteria(tmp_path: Path) -> None:
+    from fix_fit import build_test_matrix
+
+    src = tmp_path / "ride.fit"
+    src.write_bytes(_broken_mywhoosh_bytes())
+    out_dir = tmp_path / "v"
+    build_test_matrix(src, out_dir)
+    md = (out_dir / "test_matrix.md").read_text(encoding="utf-8")
+    assert "What counts as success" in md
+    assert "Recovery Time on the watch changes" in md
+    assert "Strongest success signal" in md
+
+
+def test_matrix_results_table_has_expected_columns(tmp_path: Path) -> None:
+    from fix_fit import build_test_matrix
+
+    src = tmp_path / "ride.fit"
+    src.write_bytes(_broken_mywhoosh_bytes())
+    out_dir = tmp_path / "v"
+    build_test_matrix(src, out_dir)
+    md = (out_dir / "test_matrix.md").read_text(encoding="utf-8")
+    for col in [
+        "Order",
+        "Variant",
+        "Uploaded",
+        "TE visible",
+        "Acute Load changed",
+        "Recovery Time changed",
+        "Training Status / Load Focus affected",
+        "Deleted after fail",
+        "Notes",
+    ]:
+        assert col in md, f"missing column: {col}"
+
+
+def test_matrix_returns_validation_summary(tmp_path: Path) -> None:
+    from fix_fit import build_test_matrix
+
+    src = tmp_path / "ride.fit"
+    src.write_bytes(_broken_mywhoosh_bytes())
+    out_dir = tmp_path / "v"
+    result = build_test_matrix(src, out_dir)
+    s = result["summary"]
+    assert s["total"] == 6
+    assert s["parse_ok_count"] == 6
+    assert s["crc_ok_count"] == 6
+    assert s["hr_preserved_all"] is True
+    assert s["timestamp_fixed_all"] is True
+
+
+def test_analyze_text_output_flags_unix_shifted(tmp_path: Path) -> None:
+    from fix_fit import main
+
+    src = tmp_path / "ride.fit"
+    src.write_bytes(_broken_mywhoosh_bytes())
+    rc = main(["analyze", str(src), "--no-gui"])
+    assert rc == 0
+
+
+def test_analyze_text_format_shows_record_streams(tmp_path: Path, capsys) -> None:
+    from fix_fit import main
+
+    src = tmp_path / "ride.fit"
+    src.write_bytes(_broken_mywhoosh_bytes())
+    rc = main(["analyze", str(src), "--no-gui"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "sport / sub_sport" in out
+    assert "local_ts realistic" in out
+    assert "HR" in out
+    assert "power" in out
+    assert "monotonic" in out
 
 
 def test_main_analyze_subcommand_json(tmp_path: Path) -> None:

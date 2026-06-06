@@ -48,7 +48,7 @@ Profiles available:
 | `rouvy` | rouvy (267) | 0 | Clears serial. |
 | `tacx` | tacx (89) | 0 | Clears serial. |
 
-The Garmin-cycling profiles only accept files already marked `cycling / virtual_activity`. They will refuse a real Garmin outdoor ride or a run, so you cannot accidentally relabel a different activity type.
+The Garmin-cycling profiles accept any file whose `session.sport` is already cycling, regardless of `sub_sport` (so cycling/virtual_activity, cycling/indoor_cycling, cycling/generic all pass through). They refuse files whose sport is missing or non-cycling (running, swimming, etc.) unless you pass `--force-cycling` explicitly. This guard exists so you cannot accidentally relabel a run or a swim as a ride.
 
 `--inject-metrics --ftp 250` adds the three strict-Coggan fields (NP / IF / TSS) to the session message. FTP is required; if you omit it, a one-time GUI prompt asks for it and persists the value in `fit-fix.cfg` next to the script.
 
@@ -80,6 +80,44 @@ Variants produced:
 - `06_tacx_indoor.fit` - Tacx Training
 
 Use these to find which spoof Garmin Connect actually counts toward Acute Load / Recovery Time. The procedure for each variant: upload to Connect Web, sync your watch twice, observe whether Training Status / Acute Load / Recovery Time updated, then delete the import before testing the next variant (Garmin rejects duplicate uploads of the same time window).
+
+## Controlled Garmin matrix test
+
+The whole workflow for finding out whether (and how) Garmin Connect will count your MyWhoosh rides:
+
+```text
+fit-fix analyze "C:\Users\nogom\Downloads\MyWhoosh_Limmat_Loop.fit" --json original_analyze.json
+fit-fix matrix  "C:\Users\nogom\Downloads\MyWhoosh_Limmat_Loop.fit" --out-dir variants
+```
+
+`matrix` produces six patched variants in `variants/`, validates each one (CRC, parse round-trip, HR/power/cadence/distance preservation, timestamp fix), and writes `variants/test_matrix.md` with the controlled test procedure. A concise summary is printed to the terminal so you know immediately whether anything failed to generate.
+
+Then, **one variant at a time**:
+
+1. Upload the variant to Garmin Connect Web.
+2. Wait for it to appear in your Activities list.
+3. Sync the Forerunner 265 **twice**.
+4. Check whether any of Training Effect, Acute Load, Recovery Time, or Training Status / Load Focus actually changed.
+5. If nothing changed, **delete the activity from Connect** before moving to the next variant. Connect rejects duplicate uploads of the same time window, which corrupts the experiment.
+6. Record the result in the table inside `test_matrix.md`.
+
+Test the device-spoof variants first; the timestamp-only variant is last on purpose. If it is ignored, the result tells you very little.
+
+### What counts as success
+
+Merely uploading and seeing the activity displayed in Connect is **not** success. The activity has to feed the physiological model. Success = at least one of: Training Effect that looks Garmin-processed, Acute Load change, Recovery Time change on the watch, Training Status / Load Focus update. The strongest signal is Recovery Time on the watch changing after sync.
+
+### If none of the six variants work
+
+The next experimental target (v2.1) is deeper structural matching against a real Garmin-native power-meter FIT and a known-accepted Zwift / Rouvy FIT. Likely angles:
+
+- Compare against a Garmin Edge / power-meter FIT (e.g. one of your father's recorded rides).
+- Compare against a real Zwift / Rouvy FIT that Connect has accepted into your account.
+- Match the event stream: `timer start`, `timer stop`, `session start`, `session stop_all`.
+- Match `file_creator` hardware_version, not just software_version.
+- Match `device_info` ordering, `device_index`, and serial population.
+- Match session / lap summary fields more aggressively.
+- Check whether Garmin requires API-side import metadata that simply cannot be re-created from a manually-uploaded FIT.
 
 ## Drag-and-drop launcher (Windows)
 

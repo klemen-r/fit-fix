@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import NamedTuple, Optional, Sequence
 
-__version__ = "2.0.0"
+__version__ = "2.0.1"
 
 FIT_EPOCH = datetime(1989, 12, 31, tzinfo=timezone.utc)
 FIT_SIGNATURE = b".FIT"
@@ -778,6 +778,7 @@ def fix_fit_bytes(
     mimic_garmin: bool = False,
     inject_metrics: bool = False,
     ftp: Optional[int] = None,
+    force_cycling: bool = False,
 ) -> tuple[bytes, FixReport]:
     profile_name = profile
     if mimic_zwift and mimic_garmin:
@@ -838,12 +839,23 @@ def fix_fit_bytes(
 
     if profile_obj is not None and profile_obj.manufacturer == GARMIN_MANUFACTURER:
         for session in sessions:
-            sport = _get_u8(buf, session, F_SESSION_SPORT, BT_ENUM)
-            sub_sport = _get_u8(buf, session, F_SESSION_SUB_SPORT, BT_ENUM)
-            if sport != SPORT_CYCLING or sub_sport != SUB_SPORT_VIRTUAL_ACTIVITY:
-                raise FitError(
-                    f"--profile {profile_obj.name} only accepts cycling / virtual_activity files"
-                )
+            sport_raw = _get_u8(buf, session, F_SESSION_SPORT, BT_ENUM)
+            sport = None if sport_raw in (None, 0xFF) else sport_raw
+            if sport == SPORT_CYCLING:
+                continue
+            if sport is None:
+                if not force_cycling:
+                    raise FitError(
+                        f"--profile {profile_obj.name}: session sport is missing/unknown; "
+                        "pass force_cycling=True (CLI: --force-cycling) to relabel"
+                    )
+            else:
+                sport_label = SPORT_NAMES.get(sport, f"id-{sport}")
+                if not force_cycling:
+                    raise FitError(
+                        f"--profile {profile_obj.name}: session sport is '{sport_label}', not cycling; "
+                        "pass force_cycling=True (CLI: --force-cycling) to override (unsafe)"
+                    )
 
     if profile_obj is not None:
         target_manufacturer = profile_obj.manufacturer
@@ -998,6 +1010,7 @@ def fix_fit(
     mimic_garmin: bool = False,
     inject_metrics: bool = False,
     ftp: Optional[int] = None,
+    force_cycling: bool = False,
 ) -> FixReport:
     src = Path(input_path)
     if not src.is_file():
@@ -1012,6 +1025,7 @@ def fix_fit(
         mimic_garmin=mimic_garmin,
         inject_metrics=inject_metrics,
         ftp=ftp,
+        force_cycling=force_cycling,
     )
     report.input_path = src
     if report.was_already_correct and not write_when_unchanged and output_path is None:
@@ -1314,81 +1328,168 @@ def compare_fits(paths: Sequence[Path]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _validate_variant(out_path: Path, original_records: dict) -> dict:
+    try:
+        data = out_path.read_bytes()
+    except OSError as e:
+        return {"parse_ok": False, "crc_ok": False, "error": str(e)}
+    try:
+        _walk(bytearray(data))
+    except FitError as e:
+        return {"parse_ok": False, "crc_ok": False, "error": str(e)}
+
+    a = analyze_fit(data)
+    rec = a.get("records") or {}
+    act = a.get("activity") or {}
+
+    def preserved(key: str) -> bool:
+        return rec.get(key, 0) >= original_records.get(key, 0)
+
+    local_realistic = not bool(act.get("local_timestamp_unix_shifted"))
+    sus_year = act.get("suspicious_year")
+    return {
+        "parse_ok": True,
+        "crc_ok": True,
+        "hr_preserved": preserved("hr_present"),
+        "power_preserved": preserved("power_present"),
+        "cadence_preserved": preserved("cadence_present"),
+        "speed_preserved": preserved("speed_present"),
+        "distance_preserved": preserved("distance_present"),
+        "record_count": rec.get("count", 0),
+        "local_timestamp_realistic": local_realistic,
+        "suspicious_year": sus_year,
+    }
+
+
+# (variant_filename, fix_fit_bytes kwargs, profile_label, recommended_test_order)
+MATRIX_VARIANTS: list[tuple[str, dict, str, int]] = [
+    ("01_timestamp_fixed_only", {}, "none", 6),
+    ("02_garmin_edge_indoor", {"profile": "garmin-edge"}, "garmin-edge", 1),
+    ("03_garmin_forerunner_indoor", {"profile": "garmin-forerunner"}, "garmin-forerunner", 2),
+    ("04_zwift_virtual", {"profile": "zwift"}, "zwift", 3),
+    ("05_rouvy_virtual", {"profile": "rouvy"}, "rouvy", 4),
+    ("06_tacx_indoor", {"profile": "tacx"}, "tacx", 5),
+]
+
+
 def build_test_matrix(input_path: Path, out_dir: Path, ftp: Optional[int] = None) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     src = Path(input_path)
     data = src.read_bytes()
-
-    variants = [
-        ("01_timestamp_fixed_only", {}),
-        ("02_garmin_edge_indoor", {"profile": "garmin-edge"}),
-        ("03_garmin_forerunner_indoor", {"profile": "garmin-forerunner"}),
-        ("04_zwift_virtual", {"profile": "zwift"}),
-        ("05_rouvy_virtual", {"profile": "rouvy"}),
-        ("06_tacx_indoor", {"profile": "tacx"}),
-    ]
+    original_analysis = analyze_fit(data)
+    original_records = original_analysis.get("records") or {}
 
     results: list[dict] = []
-    for name, kwargs in variants:
+    for name, kwargs, profile_label, test_order in MATRIX_VARIANTS:
         out_path = out_dir / f"{name}.fit"
+        entry: dict = {
+            "variant": name,
+            "output": out_path.name,
+            "profile": profile_label,
+            "test_order": test_order,
+            "ok": False,
+        }
         try:
             patched, rep = fix_fit_bytes(data, **kwargs)
             out_path.write_bytes(patched)
-            results.append({
-                "variant": name,
-                "output": out_path.name,
-                "ok": True,
-                "fields_patched": rep.fields_patched,
-                "messages_added": rep.messages_added,
-            })
+            entry["ok"] = True
+            entry["fields_patched"] = rep.fields_patched
+            entry["messages_added"] = rep.messages_added
+            entry.update(_validate_variant(out_path, original_records))
         except Exception as e:
-            results.append({
-                "variant": name,
-                "output": out_path.name,
-                "ok": False,
-                "error": f"{type(e).__name__}: {e}",
-            })
+            entry["error"] = f"{type(e).__name__}: {e}"
+        results.append(entry)
 
-    md = [
-        "# Garmin Connect test matrix",
-        "",
-        f"Source file: `{src.name}`",
-        "",
-        "## Variants",
-        "",
-        "| Variant | Output | Generated |",
-        "|---|---|---|",
-    ]
-    for r in results:
-        status = "ok" if r["ok"] else "FAIL: " + r.get("error", "")
-        md.append(f"| {r['variant']} | `{r['output']}` | {status} |")
+    in_order = sorted(results, key=lambda r: r["test_order"])
 
-    md += [
-        "",
-        "## Manual Garmin Connect test procedure",
-        "",
-        "1. Upload one variant to Garmin Connect Web (drag and drop or Import).",
-        "2. Sync your watch twice so any pull-back from Connect completes.",
-        "3. Open the activity on the watch and on Connect.",
-        "4. Record whether Training Effect, Acute Load, and Recovery Time updated.",
-        "5. If the activity does not affect metrics, **delete** that import in Connect before trying the next variant. Duplicate imports of the same time window are rejected.",
-        "6. Fill in the results table.",
-        "",
-        "## Results",
-        "",
-        "| Variant | Uploaded | TE visible | Acute Load changed | Recovery Time changed | Training Status | Notes |",
-        "|---|---|---|---|---|---|---|",
-    ]
-    for r in results:
-        if r["ok"]:
-            md.append(f"| {r['variant']} |  |  |  |  |  |  |")
+    md = []
+    md.append("# Garmin Connect controlled test matrix")
     md.append("")
-    md.append("> The tool makes no guarantee that any variant will be counted by Garmin. The pipeline may strictly gate on the certified-source allowlist (Garmin, Zwift, Rouvy, TrainerRoad, Tacx Training). File metadata alone may not be enough.")
+    md.append(f"Source file: `{src.name}`")
+    md.append("")
+    md.append("This document is generated. Six patched variants have been written next to it. Each is the same ride with different `file_id` / creator `device_info` metadata so we can find out which spoof, if any, makes Garmin Connect run the file through its training-load pipeline.")
+    md.append("")
+    md.append("## Testing protocol")
+    md.append("")
+    md.append("**Upload ONLY ONE variant at a time. DO NOT upload all six variants together.**")
+    md.append("")
+    md.append("If you upload several at once, Garmin may detect duplicates, merge activities, or process only one version. The result is no longer trustworthy.")
+    md.append("")
+    md.append("For each variant, in the recommended order below:")
+    md.append("")
+    md.append("1. Upload one variant to Garmin Connect Web (drag and drop or Import).")
+    md.append("2. Wait for the activity to appear in your Activities list.")
+    md.append("3. Sync your Forerunner 265 to Garmin Connect **twice** (Sync, wait for it to finish, Sync again).")
+    md.append("4. Check Connect and the watch:")
+    md.append("   - Did Training Effect appear and look Garmin-processed?")
+    md.append("   - Did Acute Load change?")
+    md.append("   - Did Recovery Time on the watch change?")
+    md.append("   - Did Training Status / Load Focus update?")
+    md.append("5. If the variant fails (none of the above changed), **delete the activity from Garmin Connect before testing the next variant**. Garmin rejects duplicate uploads of the same time window.")
+    md.append("6. Fill the result row in the table below.")
+    md.append("")
+    md.append("## Recommended test order")
+    md.append("")
+    md.append("Test the device-spoofing variants first. The plain timestamp-fixed-only variant is last on purpose: if Garmin ignores it, the result tells you little. The interesting question is whether device/source spoofing gets the file through Garmin's deeper training-load pipeline.")
+    md.append("")
+    md.append("| Order | Variant | Profile spoof | Generated |")
+    md.append("|---|---|---|---|")
+    for r in in_order:
+        status = "ok" if r["ok"] else "FAIL: " + r.get("error", "")
+        md.append(f"| {r['test_order']} | `{r['output']}` | {r['profile']} | {status} |")
+    md.append("")
+    md.append("## What counts as success")
+    md.append("")
+    md.append("Merely uploading and seeing the activity displayed in Garmin Connect is **not** success. The activity has to feed Garmin's physiological model.")
+    md.append("")
+    md.append("Success = at least one of:")
+    md.append("")
+    md.append("- Training Effect appears and looks Garmin-processed (not just a static number copied from the FIT file).")
+    md.append("- Acute Load (today's Load value in Training Status) changes.")
+    md.append("- Recovery Time on the Forerunner 265 changes.")
+    md.append("- Training Status / Load Focus updates after sync.")
+    md.append("")
+    md.append("Strongest success signal:")
+    md.append("")
+    md.append("- Upload variant -> sync watch twice -> Recovery Time on the watch changes.")
+    md.append("")
+    md.append("That is the clearest indication that Garmin actually processed the activity through its training-load pipeline.")
+    md.append("")
+    md.append("## Results")
+    md.append("")
+    md.append("Fill this in as you go. Use yes / no / n/a.")
+    md.append("")
+    md.append("| Order | Variant | Uploaded | TE visible | Acute Load changed | Recovery Time changed | Training Status / Load Focus affected | Deleted after fail | Notes |")
+    md.append("|---|---|---|---|---|---|---|---|---|")
+    for r in in_order:
+        if not r["ok"]:
+            md.append(f"| {r['test_order']} | `{r['output']}` | n/a (generation failed) | - | - | - | - | - | {r.get('error','')} |")
+            continue
+        md.append(f"| {r['test_order']} | `{r['output']}` |  |  |  |  |  |  |  |")
+    md.append("")
+    md.append("## Disclaimer")
+    md.append("")
+    md.append("This tool makes no guarantee that any variant will be accepted by Garmin Connect for training-load metrics. The pipeline appears to gate on a certified-source allowlist (Garmin devices, Zwift, Rouvy, TrainerRoad, Tacx Training). File metadata alone may not be enough; Garmin may also require the activity to arrive through the partner's cloud API rather than via manual FIT upload.")
+    md.append("")
+    md.append("If none of the six variants triggers Acute Load or Recovery Time changes, the next experimental target (v2.1) is deeper structural matching against a real Garmin-native cycling FIT (event timer start/stop pairs, file_creator hardware fields, device_info ordering and device_index, session/lap summary completeness).")
     md.append("")
 
     (out_dir / "test_matrix.md").write_text("\n".join(md), encoding="utf-8")
 
-    return {"results": results, "out_dir": str(out_dir)}
+    summary = {
+        "total": len(results),
+        "parse_ok_count": sum(1 for r in results if r.get("parse_ok")),
+        "crc_ok_count": sum(1 for r in results if r.get("crc_ok")),
+        "generation_ok_count": sum(1 for r in results if r.get("ok")),
+        "hr_preserved_all": all(r.get("hr_preserved", False) for r in results if r.get("ok")),
+        "power_preserved_all": all(r.get("power_preserved", False) for r in results if r.get("ok")),
+        "cadence_preserved_all": all(r.get("cadence_preserved", False) for r in results if r.get("ok")),
+        "speed_preserved_all": all(r.get("speed_preserved", False) for r in results if r.get("ok")),
+        "distance_preserved_all": all(r.get("distance_preserved", False) for r in results if r.get("ok")),
+        "timestamp_fixed_all": all(r.get("local_timestamp_realistic", False) for r in results if r.get("ok")),
+        "test_matrix_path": str(out_dir / "test_matrix.md"),
+    }
+    return {"results": results, "out_dir": str(out_dir), "summary": summary}
 
 
 def _config_path() -> Path:
@@ -1508,6 +1609,8 @@ def _add_patch_args(p: argparse.ArgumentParser) -> None:
                    help="compute and write Normalized Power, IF, TSS into the session")
     p.add_argument("--ftp", type=int, default=None,
                    help="FTP in watts (required for --inject-metrics; GUI prompts if unset)")
+    p.add_argument("--force-cycling", action="store_true",
+                   help="override the non-cycling refusal for Garmin profiles (UNSAFE: never relabel a run/swim as a ride unless you know what you are doing)")
     p.add_argument("--inject-te-approx", action="store_true",
                    help="ALSO write approximate aerobic Training Effect (HR-TRIMP based, NOT Garmin-native)")
     p.add_argument("--resting-hr", type=int, default=None, help="resting HR in bpm (used by --inject-te-approx)")
@@ -1547,6 +1650,96 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _format_analyze_text(report: dict) -> str:
+    name = os.path.basename(report.get("file", "?"))
+    lines = [f"=== analysis: {name} ==="]
+    if report.get("errors"):
+        for e in report["errors"]:
+            lines.append(f"ERROR: {e}")
+        return "\n".join(lines)
+    lines.append(f"source heuristic: {report.get('source_heuristic')}")
+    lines.append("")
+
+    fid = report.get("file_id") or {}
+    lines.append("file_id:")
+    lines.append(f"  manufacturer    : {fid.get('manufacturer')} (id={fid.get('manufacturer_id')})")
+    lines.append(f"  product         : {fid.get('product')}")
+    lines.append(f"  serial_number   : {fid.get('serial_number')}")
+    lines.append(f"  time_created    : {fid.get('time_created')}")
+
+    fc = report.get("file_creator")
+    lines.append("file_creator:")
+    if fc:
+        lines.append(f"  software_version: {fc.get('software_version')}")
+    else:
+        lines.append("  (no file_creator message)")
+
+    lines.append("device_info:")
+    if report.get("device_infos"):
+        for d in report["device_infos"]:
+            label = "creator" if d.get("device_index") == 0 else f"device_index={d.get('device_index')}"
+            lines.append(f"  [{label}] manufacturer_id={d.get('manufacturer_id')} product={d.get('product')}")
+    else:
+        lines.append("  (no device_info messages)")
+
+    lines.append("")
+    for i, s in enumerate(report.get("sessions") or []):
+        lines.append(f"session[{i}]:")
+        lines.append(f"  sport / sub_sport : {s.get('sport')} / {s.get('sub_sport')}")
+        lines.append(f"  start_time        : {s.get('start_time')}")
+        lines.append(f"  end_time          : {s.get('end_time')}")
+        dur = s.get("total_timer_sec")
+        if dur is not None:
+            m = int(dur) // 60
+            sec = int(dur) % 60
+            lines.append(f"  duration          : {dur:.0f} sec ({m}m {sec}s)")
+        lines.append(f"  avg / max HR      : {s.get('avg_hr')} / {s.get('max_hr')} bpm")
+        lines.append(f"  avg / max power   : {s.get('avg_power')} / {s.get('max_power')} W")
+        lines.append(f"  NP / IF / TSS     : {s.get('normalized_power')} / {s.get('intensity_factor')} / {s.get('training_stress_score')}")
+
+    a = report.get("activity") or {}
+    lines.append("")
+    lines.append("activity:")
+    lines.append(f"  timestamp           : {a.get('timestamp')}")
+    lines.append(f"  local_timestamp     : {a.get('local_timestamp')}")
+    realistic = not bool(a.get("local_timestamp_unix_shifted"))
+    note = ""
+    if not realistic:
+        sy = a.get("suspicious_year")
+        note = f"  (Unix-shifted; year {sy})" if sy else "  (Unix-shifted)"
+    lines.append(f"  local_ts realistic  : {'yes' if realistic else 'NO'}{note}")
+    lines.append(f"  suspicious year     : {a.get('suspicious_year') if a.get('suspicious_year') else 'no'}")
+
+    rec = report.get("records") or {}
+    lines.append("")
+    n = rec.get("count", 0)
+    lines.append(f"records ({n} total):")
+
+    def line(label: str, key: str) -> str:
+        v = rec.get(key, 0)
+        pct = f"{(v / n * 100):.0f}%" if n else "n/a"
+        present = "yes" if v > 0 else "no"
+        return f"  {label:<10}: {present} ({v} / {n}, {pct})"
+
+    lines.append(line("HR", "hr_present"))
+    lines.append(line("power", "power_present"))
+    lines.append(line("cadence", "cadence_present"))
+    lines.append(line("speed", "speed_present"))
+    lines.append(line("distance", "distance_present"))
+    lines.append(line("altitude", "altitude_present"))
+    lines.append(line("position", "position_present"))
+    lines.append(f"  monotonic : {'yes' if rec.get('monotonic_timestamps') else 'NO'}")
+
+    warnings = report.get("warnings") or []
+    if warnings:
+        lines.append("")
+        lines.append("warnings:")
+        for w in warnings:
+            lines.append(f"  - {w}")
+
+    return "\n".join(lines)
+
+
 def _cmd_analyze(args, use_gui: bool) -> int:
     reports = []
     ok = True
@@ -1560,15 +1753,19 @@ def _cmd_analyze(args, use_gui: bool) -> int:
         reports.append(r)
     if args.json_out:
         Path(args.json_out).write_text(json.dumps(reports, indent=2, default=str), encoding="utf-8")
-        msg = f"Wrote {args.json_out}"
-    else:
-        msg = json.dumps(reports, indent=2, default=str)
+        if use_gui:
+            _gui_notify(ok, f"Wrote {args.json_out}")
+        elif sys.stdout is not None:
+            print(f"Wrote {args.json_out}")
+        return 0 if ok else 1
+
+    body = "\n\n".join(_format_analyze_text(r) for r in reports)
     if use_gui:
-        _gui_notify(ok, msg if args.json_out else f"Analyzed {len(reports)} file(s). Use --json to capture output.")
+        _gui_notify(ok, body)
     else:
         stream = sys.stdout if ok else sys.stderr
         if stream is not None:
-            print(msg, file=stream)
+            print(body, file=stream)
     return 0 if ok else 1
 
 
@@ -1593,6 +1790,27 @@ def _cmd_compare(args, use_gui: bool) -> int:
     return 0
 
 
+def _format_matrix_summary(result: dict) -> str:
+    s = result["summary"]
+    lines = [
+        f"Generated {s['generation_ok_count']}/{s['total']} Garmin test variants in {result['out_dir']}",
+        "",
+        "Validation:",
+        f"- {s['parse_ok_count']}/{s['total']} files parse successfully",
+        f"- {s['crc_ok_count']}/{s['total']} CRC checks passed",
+        f"- HR stream preserved:        {'yes' if s['hr_preserved_all'] else 'no'}",
+        f"- Power stream preserved:     {'yes' if s['power_preserved_all'] else 'no'}",
+        f"- Cadence stream preserved:   {'yes' if s['cadence_preserved_all'] else 'no'}",
+        f"- Speed stream preserved:     {'yes' if s['speed_preserved_all'] else 'no'}",
+        f"- Distance stream preserved:  {'yes' if s['distance_preserved_all'] else 'no'}",
+        f"- Suspicious local_timestamp fixed: {'yes' if s['timestamp_fixed_all'] else 'no'}",
+        "",
+        "Next:",
+        f"Open {s['test_matrix_path']} and test ONE file at a time in Garmin Connect.",
+    ]
+    return "\n".join(lines)
+
+
 def _cmd_matrix(args, use_gui: bool) -> int:
     out_dir = Path(args.out_dir)
     try:
@@ -1604,7 +1822,7 @@ def _cmd_matrix(args, use_gui: bool) -> int:
         elif sys.stderr is not None:
             print(msg, file=sys.stderr)
         return 1
-    body = f"Wrote {len(result['results'])} variants to {result['out_dir']}\nSee test_matrix.md in that folder for testing instructions."
+    body = _format_matrix_summary(result)
     if use_gui:
         _gui_notify(True, body)
     elif sys.stdout is not None:
@@ -1722,6 +1940,7 @@ def _cmd_patch(args, use_gui: bool) -> int:
                 mimic_garmin=args.mimic_garmin,
                 inject_metrics=args.inject_metrics,
                 ftp=ftp,
+                force_cycling=args.force_cycling,
             )
             if args.inject_te_approx:
                 lines.append(_format_report(r) + "\n      (approximate TE injection not yet implemented in v2; TODO)")
