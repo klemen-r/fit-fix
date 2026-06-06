@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fit-fix"
-version = "1.4.0"
-description = "Repair MyWhoosh FIT timestamps for Garmin Connect"
+version = "2.0.0"
+description = "Analyze, repair, and re-shape MyWhoosh FIT exports for Garmin Connect compatibility"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]

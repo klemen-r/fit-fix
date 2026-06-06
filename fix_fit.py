@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import NamedTuple, Optional, Sequence
 
-__version__ = "1.4.0"
+__version__ = "2.0.0"
 
 FIT_EPOCH = datetime(1989, 12, 31, tzinfo=timezone.utc)
 FIT_SIGNATURE = b".FIT"
@@ -46,8 +46,34 @@ F_DEVICE_MANUFACTURER = 2
 F_DEVICE_PRODUCT = 4
 F_DEVICE_PRODUCT_NAME = 27
 F_FILE_CREATOR_SOFTWARE_VERSION = 0
+F_RECORD_POSITION_LAT = 0
+F_RECORD_POSITION_LONG = 1
+F_RECORD_ALTITUDE = 2
 F_RECORD_HEART_RATE = 3
+F_RECORD_CADENCE = 4
+F_RECORD_DISTANCE = 5
+F_RECORD_SPEED = 6
 F_RECORD_POWER = 7
+
+F_SESSION_TOTAL_DISTANCE = 9
+F_SESSION_TOTAL_CALORIES = 11
+F_SESSION_AVG_HR = 16
+F_SESSION_MAX_HR = 17
+F_SESSION_AVG_CADENCE = 18
+F_SESSION_MAX_CADENCE = 19
+F_SESSION_AVG_POWER = 20
+F_SESSION_MAX_POWER = 21
+F_SESSION_TOTAL_ASCENT = 22
+
+F_LAP_TIMESTAMP = 253
+F_LAP_START_TIME = 2
+
+F_FILE_ID_TIME_CREATED = 4
+F_FILE_ID_TYPE = 0
+
+F_ACTIVITY_TYPE = 2
+F_ACTIVITY_EVENT = 3
+F_ACTIVITY_EVENT_TYPE = 4
 
 BT_UINT8 = 0x02
 BT_ENUM = 0x00
@@ -58,10 +84,107 @@ BT_UINT32Z = 0x0C
 ZWIFT_MANUFACTURER = 260
 MYWHOOSH_MANUFACTURER = 331
 GARMIN_MANUFACTURER = 1
+TACX_MANUFACTURER = 89
+ROUVY_MANUFACTURER = 267
+WAHOO_MANUFACTURER = 32
+
 EDGE_530_PRODUCT = 3121
+EDGE_1030_PLUS_PRODUCT = 3570
+FR_265_PRODUCT = 4257
 EDGE_530_SOFTWARE_VERSION = 1140
+
 SPORT_CYCLING = 2
+SPORT_RUNNING = 1
+SUB_SPORT_INDOOR_CYCLING = 6
 SUB_SPORT_VIRTUAL_ACTIVITY = 58
+
+MANUFACTURER_NAMES = {
+    1: "garmin",
+    32: "wahoo_fitness",
+    89: "tacx",
+    260: "zwift",
+    263: "trainerroad",
+    264: "the_sufferfest",
+    266: "bkool",
+    267: "rouvy",
+    331: "mywhoosh",
+}
+
+SPORT_NAMES = {0: "generic", 1: "running", 2: "cycling", 4: "fitness_equipment", 5: "swimming"}
+SUB_SPORT_NAMES = {
+    0: "generic", 6: "indoor_cycling", 7: "road", 8: "mountain", 10: "recumbent",
+    20: "strength_training", 26: "cardio_training", 45: "indoor_running",
+    46: "gravel_cycling", 58: "virtual_activity",
+}
+
+
+@dataclass(frozen=True)
+class Profile:
+    name: str
+    manufacturer: int
+    product: int
+    product_name: str
+    software_version: int
+    clear_serial: bool
+    add_creator_device_info: bool
+
+
+PROFILES: dict[str, Profile] = {
+    "garmin-edge": Profile(
+        name="garmin-edge",
+        manufacturer=GARMIN_MANUFACTURER,
+        product=EDGE_530_PRODUCT,
+        product_name="Edge 530",
+        software_version=EDGE_530_SOFTWARE_VERSION,
+        clear_serial=False,
+        add_creator_device_info=True,
+    ),
+    "garmin-edge-1030": Profile(
+        name="garmin-edge-1030",
+        manufacturer=GARMIN_MANUFACTURER,
+        product=EDGE_1030_PLUS_PRODUCT,
+        product_name="Edge 1030 Plus",
+        software_version=1140,
+        clear_serial=False,
+        add_creator_device_info=True,
+    ),
+    "garmin-forerunner": Profile(
+        name="garmin-forerunner",
+        manufacturer=GARMIN_MANUFACTURER,
+        product=FR_265_PRODUCT,
+        product_name="Forerunner 265",
+        software_version=900,
+        clear_serial=False,
+        add_creator_device_info=True,
+    ),
+    "zwift": Profile(
+        name="zwift",
+        manufacturer=ZWIFT_MANUFACTURER,
+        product=0,
+        product_name="Zwift",
+        software_version=0,
+        clear_serial=True,
+        add_creator_device_info=True,
+    ),
+    "rouvy": Profile(
+        name="rouvy",
+        manufacturer=ROUVY_MANUFACTURER,
+        product=0,
+        product_name="Rouvy",
+        software_version=0,
+        clear_serial=True,
+        add_creator_device_info=True,
+    ),
+    "tacx": Profile(
+        name="tacx",
+        manufacturer=TACX_MANUFACTURER,
+        product=0,
+        product_name="Tacx Training",
+        software_version=0,
+        clear_serial=True,
+        add_creator_device_info=True,
+    ),
+}
 
 NP_WINDOW_SECONDS = 30
 
@@ -650,13 +773,26 @@ def fix_fit_bytes(
     data: bytes,
     tz: Optional[tzinfo] = None,
     *,
+    profile: Optional[str] = None,
     mimic_zwift: bool = False,
     mimic_garmin: bool = False,
     inject_metrics: bool = False,
     ftp: Optional[int] = None,
 ) -> tuple[bytes, FixReport]:
+    profile_name = profile
     if mimic_zwift and mimic_garmin:
         raise FitError("--mimic-zwift and --mimic-garmin cannot be used together")
+    if profile_name and (mimic_zwift or mimic_garmin):
+        raise FitError("--profile cannot be combined with --mimic-zwift/--mimic-garmin")
+    if mimic_zwift:
+        profile_name = "zwift"
+    elif mimic_garmin:
+        profile_name = "garmin-edge"
+    profile_obj: Optional[Profile] = None
+    if profile_name is not None:
+        profile_obj = PROFILES.get(profile_name)
+        if profile_obj is None:
+            raise FitError(f"unknown profile: {profile_name}")
 
     buf = bytearray(data)
     msgs, body_end, header_size, used_local = _walk(buf)
@@ -700,21 +836,20 @@ def fix_fit_bytes(
         patches += _set_u32(buf, activity, F_TIMESTAMP, activity_end)
         patches += _set_u32(buf, activity, F_ACTIVITY_LOCAL_TS, local_end)
 
-    target = None
-    if mimic_zwift:
-        target = (ZWIFT_MANUFACTURER, 0, "Zwift", True)
-    elif mimic_garmin:
+    if profile_obj is not None and profile_obj.manufacturer == GARMIN_MANUFACTURER:
         for session in sessions:
             sport = _get_u8(buf, session, F_SESSION_SPORT, BT_ENUM)
             sub_sport = _get_u8(buf, session, F_SESSION_SUB_SPORT, BT_ENUM)
             if sport != SPORT_CYCLING or sub_sport != SUB_SPORT_VIRTUAL_ACTIVITY:
                 raise FitError(
-                    "--mimic-garmin only accepts cycling / virtual_activity files"
+                    f"--profile {profile_obj.name} only accepts cycling / virtual_activity files"
                 )
-        target = (GARMIN_MANUFACTURER, EDGE_530_PRODUCT, "Edge 530", False)
 
-    if target is not None:
-        target_manufacturer, target_product, target_name, clear_serial = target
+    if profile_obj is not None:
+        target_manufacturer = profile_obj.manufacturer
+        target_product = profile_obj.product
+        target_name = profile_obj.product_name
+        clear_serial = profile_obj.clear_serial
         add_creator_at = None
         for fi in file_ids:
             manufacturer = _field(fi, F_FILE_ID_MANUFACTURER, 2, BT_UINT16)
@@ -750,9 +885,12 @@ def fix_fit_bytes(
                         buf, device, F_DEVICE_PRODUCT, target_product
                     )
 
-        if mimic_garmin:
+        if profile_obj.software_version > 0:
             for fc in file_creators:
-                patches += _set_u16(buf, fc, F_FILE_CREATOR_SOFTWARE_VERSION, EDGE_530_SOFTWARE_VERSION)
+                patches += _set_u16(buf, fc, F_FILE_CREATOR_SOFTWARE_VERSION, profile_obj.software_version)
+
+        if profile_obj.add_creator_device_info:
+            pass  # handled below by add_creator_at logic
 
         if add_creator_at is not None and not has_creator:
             local_mt = next((i for i in range(16) if i not in used_local), None)
@@ -855,6 +993,7 @@ def fix_fit(
     overwrite: bool = False,
     in_place: bool = False,
     write_when_unchanged: bool = False,
+    profile: Optional[str] = None,
     mimic_zwift: bool = False,
     mimic_garmin: bool = False,
     inject_metrics: bool = False,
@@ -868,6 +1007,7 @@ def fix_fit(
     fixed, report = fix_fit_bytes(
         src.read_bytes(),
         tz=tz,
+        profile=profile,
         mimic_zwift=mimic_zwift,
         mimic_garmin=mimic_garmin,
         inject_metrics=inject_metrics,
@@ -902,6 +1042,353 @@ def _format_report(r: FixReport) -> str:
         f"      fields patched: {r.fields_patched}\n"
         f"      messages added: {r.messages_added}"
     )
+
+
+def _read_value(buf, msg_offsets: dict, field_num: int, endian: str):
+    f = msg_offsets.get(field_num)
+    if not f:
+        return None
+    pos, size, base = f
+    if base in (BT_ENUM, BT_UINT8) and size == 1:
+        v = buf[pos]
+        return None if v == 0xFF else v
+    if base == BT_UINT16 and size == 2:
+        v = struct.unpack_from(endian + "H", buf, pos)[0]
+        return None if v == 0xFFFF else v
+    if base == BT_UINT32 and size == 4:
+        v = struct.unpack_from(endian + "I", buf, pos)[0]
+        return None if v == U32_INVALID else v
+    if base == BT_UINT32Z and size == 4:
+        v = struct.unpack_from(endian + "I", buf, pos)[0]
+        return None if v == 0 else v
+    return None
+
+
+def _detect_source(manufacturer: Optional[int], software_version: Optional[int]) -> str:
+    if manufacturer is None:
+        return "unknown"
+    name = MANUFACTURER_NAMES.get(manufacturer, f"id-{manufacturer}")
+    if manufacturer == MYWHOOSH_MANUFACTURER:
+        return "mywhoosh"
+    return name
+
+
+def _fit_ts_to_iso(raw: Optional[int]) -> Optional[str]:
+    if raw is None or raw == 0:
+        return None
+    try:
+        return (FIT_EPOCH + timedelta(seconds=int(raw))).isoformat()
+    except Exception:
+        return None
+
+
+def analyze_fit(data: bytes) -> dict:
+    report: dict = {
+        "file_size": len(data),
+        "warnings": [],
+        "errors": [],
+    }
+    try:
+        buf_bytes = bytearray(data)
+        defs, datas, body_end, header_size = _walk_detailed(buf_bytes)
+    except FitError as e:
+        report["errors"].append(str(e))
+        return report
+
+    report["header_size"] = header_size
+    report["body_size"] = body_end - header_size
+
+    by_global: dict[int, int] = {}
+    for d in datas:
+        by_global[d.global_num] = by_global.get(d.global_num, 0) + 1
+    report["message_counts"] = dict(sorted(by_global.items()))
+
+    file_ids = [d for d in datas if d.global_num == MSG_FILE_ID]
+    fid_info: dict = {}
+    if file_ids:
+        fi = file_ids[0]
+        manufacturer = _read_value(buf_bytes, fi.offsets, F_FILE_ID_MANUFACTURER, fi.endian)
+        product = _read_value(buf_bytes, fi.offsets, F_FILE_ID_PRODUCT, fi.endian)
+        serial = _read_value(buf_bytes, fi.offsets, F_FILE_ID_SERIAL, fi.endian)
+        time_created = _read_value(buf_bytes, fi.offsets, F_FILE_ID_TIME_CREATED, fi.endian)
+        file_type = _read_value(buf_bytes, fi.offsets, F_FILE_ID_TYPE, fi.endian)
+        fid_info = {
+            "manufacturer_id": manufacturer,
+            "manufacturer": MANUFACTURER_NAMES.get(manufacturer, f"id-{manufacturer}") if manufacturer is not None else None,
+            "product": product,
+            "serial_number": serial,
+            "time_created": _fit_ts_to_iso(time_created),
+            "file_type": file_type,
+        }
+    report["file_id"] = fid_info
+
+    creators = [d for d in datas if d.global_num == MSG_FILE_CREATOR]
+    if creators:
+        c = creators[0]
+        sw = _read_value(buf_bytes, c.offsets, F_FILE_CREATOR_SOFTWARE_VERSION, c.endian)
+        report["file_creator"] = {"software_version": sw}
+    else:
+        report["file_creator"] = None
+
+    device_infos = []
+    for di in [d for d in datas if d.global_num == MSG_DEVICE_INFO]:
+        device_infos.append({
+            "device_index": _read_value(buf_bytes, di.offsets, F_DEVICE_INDEX, di.endian),
+            "manufacturer_id": _read_value(buf_bytes, di.offsets, F_DEVICE_MANUFACTURER, di.endian),
+            "product": _read_value(buf_bytes, di.offsets, F_DEVICE_PRODUCT, di.endian),
+        })
+    report["device_infos"] = device_infos
+
+    sessions_info = []
+    sessions = [d for d in datas if d.global_num == MSG_SESSION]
+    for s in sessions:
+        start = _read_value(buf_bytes, s.offsets, F_SESSION_START_TIME, s.endian)
+        end = _read_value(buf_bytes, s.offsets, F_TIMESTAMP, s.endian)
+        elapsed = _read_value(buf_bytes, s.offsets, F_SESSION_TOTAL_ELAPSED, s.endian)
+        timer = _read_value(buf_bytes, s.offsets, F_SESSION_TOTAL_TIMER, s.endian)
+        sport = _read_value(buf_bytes, s.offsets, F_SESSION_SPORT, s.endian)
+        sub_sport = _read_value(buf_bytes, s.offsets, F_SESSION_SUB_SPORT, s.endian)
+        sessions_info.append({
+            "start_time": _fit_ts_to_iso(start),
+            "end_time": _fit_ts_to_iso(end),
+            "total_elapsed_sec": (elapsed / 1000) if elapsed is not None else None,
+            "total_timer_sec": (timer / 1000) if timer is not None else None,
+            "sport": SPORT_NAMES.get(sport, str(sport)) if sport is not None else None,
+            "sub_sport": SUB_SPORT_NAMES.get(sub_sport, str(sub_sport)) if sub_sport is not None else None,
+            "avg_hr": _read_value(buf_bytes, s.offsets, F_SESSION_AVG_HR, s.endian),
+            "max_hr": _read_value(buf_bytes, s.offsets, F_SESSION_MAX_HR, s.endian),
+            "avg_power": _read_value(buf_bytes, s.offsets, F_SESSION_AVG_POWER, s.endian),
+            "max_power": _read_value(buf_bytes, s.offsets, F_SESSION_MAX_POWER, s.endian),
+            "avg_cadence": _read_value(buf_bytes, s.offsets, F_SESSION_AVG_CADENCE, s.endian),
+            "total_distance_m": (_read_value(buf_bytes, s.offsets, F_SESSION_TOTAL_DISTANCE, s.endian) or 0) / 100 or None,
+            "total_calories": _read_value(buf_bytes, s.offsets, F_SESSION_TOTAL_CALORIES, s.endian),
+            "normalized_power": _read_value(buf_bytes, s.offsets, F_SESSION_NORMALIZED_POWER, s.endian),
+            "intensity_factor": (_read_value(buf_bytes, s.offsets, F_SESSION_IF, s.endian) or 0) / 1000 or None,
+            "training_stress_score": (_read_value(buf_bytes, s.offsets, F_SESSION_TSS, s.endian) or 0) / 10 or None,
+        })
+    report["sessions"] = sessions_info
+
+    laps_info = []
+    for lap in [d for d in datas if d.global_num == 19]:
+        laps_info.append({
+            "start_time": _fit_ts_to_iso(_read_value(buf_bytes, lap.offsets, F_LAP_START_TIME, lap.endian)),
+            "end_time": _fit_ts_to_iso(_read_value(buf_bytes, lap.offsets, F_LAP_TIMESTAMP, lap.endian)),
+        })
+    report["laps"] = laps_info
+
+    activities = [d for d in datas if d.global_num == MSG_ACTIVITY]
+    activity_info = None
+    if activities:
+        a = activities[0]
+        ts = _read_value(buf_bytes, a.offsets, F_TIMESTAMP, a.endian)
+        local_ts_raw = _read_value(buf_bytes, a.offsets, F_ACTIVITY_LOCAL_TS, a.endian)
+        local_ts_iso = _fit_ts_to_iso(local_ts_raw)
+        unix_shifted = False
+        suspicious_year = None
+        if local_ts_raw is not None and ts is not None:
+            unix_shifted = abs((int(local_ts_raw) - int(ts)) - UNIX_FIT_EPOCH_OFFSET) <= MAX_TZ_OFFSET
+            try:
+                year = (FIT_EPOCH + timedelta(seconds=int(local_ts_raw))).year
+                if year >= 2040:
+                    suspicious_year = year
+            except Exception:
+                pass
+        activity_info = {
+            "timestamp": _fit_ts_to_iso(ts),
+            "local_timestamp": local_ts_iso,
+            "local_timestamp_unix_shifted": unix_shifted,
+            "suspicious_year": suspicious_year,
+            "type": _read_value(buf_bytes, a.offsets, F_ACTIVITY_TYPE, a.endian),
+        }
+        if unix_shifted:
+            report["warnings"].append(f"activity.local_timestamp appears Unix-shifted (year {suspicious_year})")
+    report["activity"] = activity_info
+
+    record_datas = [d for d in datas if d.global_num == MSG_RECORD]
+    hr_count = power_count = cadence_count = distance_count = speed_count = altitude_count = position_count = 0
+    first_ts = last_ts = None
+    monotonic = True
+    prev_ts = None
+    for d in record_datas:
+        ts_off = d.offsets.get(F_TIMESTAMP)
+        if ts_off and ts_off[1] == 4:
+            t = _u32(buf_bytes, ts_off[0], d.endian)
+            if t != U32_INVALID and t != 0:
+                if first_ts is None:
+                    first_ts = t
+                last_ts = t
+                if prev_ts is not None and t < prev_ts:
+                    monotonic = False
+                prev_ts = t
+        if d.offsets.get(F_RECORD_HEART_RATE):
+            hr_count += 1
+        if d.offsets.get(F_RECORD_POWER):
+            power_count += 1
+        if d.offsets.get(F_RECORD_CADENCE):
+            cadence_count += 1
+        if d.offsets.get(F_RECORD_DISTANCE):
+            distance_count += 1
+        if d.offsets.get(F_RECORD_SPEED):
+            speed_count += 1
+        if d.offsets.get(F_RECORD_ALTITUDE):
+            altitude_count += 1
+        if d.offsets.get(F_RECORD_POSITION_LAT):
+            position_count += 1
+    report["records"] = {
+        "count": len(record_datas),
+        "hr_present": hr_count,
+        "power_present": power_count,
+        "cadence_present": cadence_count,
+        "distance_present": distance_count,
+        "speed_present": speed_count,
+        "altitude_present": altitude_count,
+        "position_present": position_count,
+        "monotonic_timestamps": monotonic,
+        "first_timestamp": _fit_ts_to_iso(first_ts),
+        "last_timestamp": _fit_ts_to_iso(last_ts),
+    }
+    if not monotonic:
+        report["warnings"].append("record timestamps not monotonic")
+
+    manuf = fid_info.get("manufacturer_id") if fid_info else None
+    sw_version = report["file_creator"]["software_version"] if report.get("file_creator") else None
+    report["source_heuristic"] = _detect_source(manuf, sw_version)
+
+    return report
+
+
+def compare_fits(paths: Sequence[Path]) -> str:
+    rows: list[tuple[str, dict]] = []
+    for p in paths:
+        try:
+            r = analyze_fit(Path(p).read_bytes())
+        except FitError as e:
+            r = {"errors": [str(e)]}
+        rows.append((Path(p).name, r))
+
+    lines = ["# FIT comparison\n"]
+    keys = [
+        ("source", lambda r: r.get("source_heuristic")),
+        ("file_id.manufacturer", lambda r: (r.get("file_id") or {}).get("manufacturer")),
+        ("file_id.product", lambda r: (r.get("file_id") or {}).get("product")),
+        ("file_id.serial", lambda r: (r.get("file_id") or {}).get("serial_number")),
+        ("file_id.time_created", lambda r: (r.get("file_id") or {}).get("time_created")),
+        ("file_creator.sw_version", lambda r: (r.get("file_creator") or {}).get("software_version") if r.get("file_creator") else None),
+        ("session.sport", lambda r: (r.get("sessions") or [{}])[0].get("sport")),
+        ("session.sub_sport", lambda r: (r.get("sessions") or [{}])[0].get("sub_sport")),
+        ("session.avg_hr", lambda r: (r.get("sessions") or [{}])[0].get("avg_hr")),
+        ("session.max_hr", lambda r: (r.get("sessions") or [{}])[0].get("max_hr")),
+        ("session.avg_power", lambda r: (r.get("sessions") or [{}])[0].get("avg_power")),
+        ("session.normalized_power", lambda r: (r.get("sessions") or [{}])[0].get("normalized_power")),
+        ("session.training_stress_score", lambda r: (r.get("sessions") or [{}])[0].get("training_stress_score")),
+        ("records.count", lambda r: (r.get("records") or {}).get("count")),
+        ("records.hr_present", lambda r: (r.get("records") or {}).get("hr_present")),
+        ("records.power_present", lambda r: (r.get("records") or {}).get("power_present")),
+        ("activity.local_ts_unix_shifted", lambda r: (r.get("activity") or {}).get("local_timestamp_unix_shifted")),
+    ]
+    header = "| field | " + " | ".join(n for n, _ in rows) + " |"
+    sep = "|---" * (len(rows) + 1) + "|"
+    lines.append(header)
+    lines.append(sep)
+    for label, getter in keys:
+        row_vals = []
+        for _name, r in rows:
+            try:
+                v = getter(r)
+            except Exception:
+                v = None
+            row_vals.append("-" if v is None else str(v))
+        lines.append(f"| {label} | " + " | ".join(row_vals) + " |")
+
+    lines.append("\n## Message types\n")
+    all_globals = set()
+    for _n, r in rows:
+        for g in (r.get("message_counts") or {}):
+            all_globals.add(g)
+    lines.append("| global_num | " + " | ".join(n for n, _ in rows) + " |")
+    lines.append(sep)
+    for g in sorted(all_globals):
+        cells = [str((r.get("message_counts") or {}).get(g, "-")) for _n, r in rows]
+        lines.append(f"| {g} | " + " | ".join(cells) + " |")
+
+    return "\n".join(lines) + "\n"
+
+
+def build_test_matrix(input_path: Path, out_dir: Path, ftp: Optional[int] = None) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    src = Path(input_path)
+    data = src.read_bytes()
+
+    variants = [
+        ("01_timestamp_fixed_only", {}),
+        ("02_garmin_edge_indoor", {"profile": "garmin-edge"}),
+        ("03_garmin_forerunner_indoor", {"profile": "garmin-forerunner"}),
+        ("04_zwift_virtual", {"profile": "zwift"}),
+        ("05_rouvy_virtual", {"profile": "rouvy"}),
+        ("06_tacx_indoor", {"profile": "tacx"}),
+    ]
+
+    results: list[dict] = []
+    for name, kwargs in variants:
+        out_path = out_dir / f"{name}.fit"
+        try:
+            patched, rep = fix_fit_bytes(data, **kwargs)
+            out_path.write_bytes(patched)
+            results.append({
+                "variant": name,
+                "output": out_path.name,
+                "ok": True,
+                "fields_patched": rep.fields_patched,
+                "messages_added": rep.messages_added,
+            })
+        except Exception as e:
+            results.append({
+                "variant": name,
+                "output": out_path.name,
+                "ok": False,
+                "error": f"{type(e).__name__}: {e}",
+            })
+
+    md = [
+        "# Garmin Connect test matrix",
+        "",
+        f"Source file: `{src.name}`",
+        "",
+        "## Variants",
+        "",
+        "| Variant | Output | Generated |",
+        "|---|---|---|",
+    ]
+    for r in results:
+        status = "ok" if r["ok"] else "FAIL: " + r.get("error", "")
+        md.append(f"| {r['variant']} | `{r['output']}` | {status} |")
+
+    md += [
+        "",
+        "## Manual Garmin Connect test procedure",
+        "",
+        "1. Upload one variant to Garmin Connect Web (drag and drop or Import).",
+        "2. Sync your watch twice so any pull-back from Connect completes.",
+        "3. Open the activity on the watch and on Connect.",
+        "4. Record whether Training Effect, Acute Load, and Recovery Time updated.",
+        "5. If the activity does not affect metrics, **delete** that import in Connect before trying the next variant. Duplicate imports of the same time window are rejected.",
+        "6. Fill in the results table.",
+        "",
+        "## Results",
+        "",
+        "| Variant | Uploaded | TE visible | Acute Load changed | Recovery Time changed | Training Status | Notes |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for r in results:
+        if r["ok"]:
+            md.append(f"| {r['variant']} |  |  |  |  |  |  |")
+    md.append("")
+    md.append("> The tool makes no guarantee that any variant will be counted by Garmin. The pipeline may strictly gate on the certified-source allowlist (Garmin, Zwift, Rouvy, TrainerRoad, Tacx Training). File metadata alone may not be enough.")
+    md.append("")
+
+    (out_dir / "test_matrix.md").write_text("\n".join(md), encoding="utf-8")
+
+    return {"results": results, "out_dir": str(out_dir)}
 
 
 def _config_path() -> Path:
@@ -1004,47 +1491,143 @@ def _gui_pick_files() -> Optional[list[str]]:
                 pass
 
 
-def _build_arg_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
-        prog="fit-fix",
-        description="Repair MyWhoosh FIT metadata for Garmin Connect.",
-    )
+def _add_patch_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("files", nargs="*", help="one or more .fit files")
     p.add_argument("-o", "--output", help="output path (single input only)")
+    p.add_argument("--out-dir", help="output directory (writes <name>_fixed.fit per input)")
     p.add_argument("--in-place", action="store_true", help="overwrite input")
     p.add_argument("--overwrite", action="store_true", help="overwrite output if it exists")
     p.add_argument("--write-when-unchanged", action="store_true",
                    help="write a copy even if input is already correct")
     p.add_argument("--utc", action="store_true", help="use UTC for local_timestamp")
-    p.add_argument("--mimic-zwift", action="store_true",
-                   help="rewrite MyWhoosh file_id as Zwift (260)")
-    p.add_argument("--mimic-garmin", action="store_true",
-                   help="rewrite virtual MyWhoosh creator as Garmin Edge 530")
+    p.add_argument("--profile", choices=list(PROFILES.keys()), default=None,
+                   help="device profile to spoof in file_id and creator device_info")
+    p.add_argument("--mimic-zwift", action="store_true", help="(legacy) shorthand for --profile zwift")
+    p.add_argument("--mimic-garmin", action="store_true", help="(legacy) shorthand for --profile garmin-edge")
     p.add_argument("--inject-metrics", action="store_true",
                    help="compute and write Normalized Power, IF, TSS into the session")
     p.add_argument("--ftp", type=int, default=None,
-                   help="FTP in watts (required for --inject-metrics; prompts via GUI if unset)")
+                   help="FTP in watts (required for --inject-metrics; GUI prompts if unset)")
+    p.add_argument("--inject-te-approx", action="store_true",
+                   help="ALSO write approximate aerobic Training Effect (HR-TRIMP based, NOT Garmin-native)")
+    p.add_argument("--resting-hr", type=int, default=None, help="resting HR in bpm (used by --inject-te-approx)")
+    p.add_argument("--max-hr", type=int, default=None, help="max HR in bpm (used by --inject-te-approx)")
+    p.add_argument("--lthr", type=int, default=None, help="lactate threshold HR (used by --inject-te-approx)")
     p.add_argument("--no-gui", action="store_true", help="never show popups")
+
+
+def _build_arg_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="fit-fix",
+        description="Analyze and repair MyWhoosh FIT exports for Garmin Connect compatibility.",
+    )
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    sub = p.add_subparsers(dest="command")
+
+    p_patch = sub.add_parser("patch", help="patch one or more FIT files (default action)")
+    _add_patch_args(p_patch)
+
+    p_analyze = sub.add_parser("analyze", help="emit a structured report on each FIT file")
+    p_analyze.add_argument("files", nargs="+", help="one or more .fit files")
+    p_analyze.add_argument("--json", dest="json_out", help="write a single JSON report instead of stdout text")
+    p_analyze.add_argument("--no-gui", action="store_true", help="never show popups")
+
+    p_compare = sub.add_parser("compare", help="compare 2+ FIT files side by side")
+    p_compare.add_argument("files", nargs="+", help="two or more .fit files to compare")
+    p_compare.add_argument("--md", dest="md_out", help="write markdown report to file instead of stdout")
+    p_compare.add_argument("--json", dest="json_out", help="write JSON report")
+    p_compare.add_argument("--no-gui", action="store_true", help="never show popups")
+
+    p_matrix = sub.add_parser("matrix", help="generate a set of patched variants for manual Garmin testing")
+    p_matrix.add_argument("file", help="MyWhoosh .fit file to use as source")
+    p_matrix.add_argument("--out-dir", required=True, help="directory to write variants and test_matrix.md")
+    p_matrix.add_argument("--ftp", type=int, default=None, help="optional FTP for metric variants")
+    p_matrix.add_argument("--no-gui", action="store_true", help="never show popups")
+
     return p
 
 
-def main(argv: Optional[Sequence[str]] = None) -> int:
-    parser = _build_arg_parser()
-    use_gui = not _has_console()
-    try:
-        args = parser.parse_args(argv)
-    except SystemExit as e:
-        code = int(e.code) if isinstance(e.code, int) else 2
-        if use_gui and code != 0:
-            _gui_notify(False, "Invalid arguments.")
-        return code
-    except Exception as e:
-        if use_gui:
-            _gui_notify(False, f"Argument parsing failed: {e}")
-        return 2
+def _cmd_analyze(args, use_gui: bool) -> int:
+    reports = []
+    ok = True
+    for p in args.files:
+        try:
+            r = analyze_fit(Path(p).read_bytes())
+            r["file"] = str(p)
+        except Exception as e:
+            ok = False
+            r = {"file": str(p), "errors": [f"{type(e).__name__}: {e}"]}
+        reports.append(r)
+    if args.json_out:
+        Path(args.json_out).write_text(json.dumps(reports, indent=2, default=str), encoding="utf-8")
+        msg = f"Wrote {args.json_out}"
+    else:
+        msg = json.dumps(reports, indent=2, default=str)
+    if use_gui:
+        _gui_notify(ok, msg if args.json_out else f"Analyzed {len(reports)} file(s). Use --json to capture output.")
+    else:
+        stream = sys.stdout if ok else sys.stderr
+        if stream is not None:
+            print(msg, file=stream)
+    return 0 if ok else 1
 
-    use_gui = use_gui and not args.no_gui
+
+def _cmd_compare(args, use_gui: bool) -> int:
+    if len(args.files) < 2:
+        msg = "compare needs at least two files"
+        if use_gui:
+            _gui_notify(False, msg)
+        elif sys.stderr is not None:
+            print(msg, file=sys.stderr)
+        return 2
+    md = compare_fits([Path(p) for p in args.files])
+    if args.md_out:
+        Path(args.md_out).write_text(md, encoding="utf-8")
+    if args.json_out:
+        reports = [analyze_fit(Path(p).read_bytes()) | {"file": str(p)} for p in args.files]
+        Path(args.json_out).write_text(json.dumps(reports, indent=2, default=str), encoding="utf-8")
+    if use_gui:
+        _gui_notify(True, f"Compared {len(args.files)} files.")
+    elif sys.stdout is not None:
+        print(md)
+    return 0
+
+
+def _cmd_matrix(args, use_gui: bool) -> int:
+    out_dir = Path(args.out_dir)
+    try:
+        result = build_test_matrix(Path(args.file), out_dir, ftp=args.ftp)
+    except Exception as e:
+        msg = f"matrix failed: {type(e).__name__}: {e}"
+        if use_gui:
+            _gui_notify(False, msg)
+        elif sys.stderr is not None:
+            print(msg, file=sys.stderr)
+        return 1
+    body = f"Wrote {len(result['results'])} variants to {result['out_dir']}\nSee test_matrix.md in that folder for testing instructions."
+    if use_gui:
+        _gui_notify(True, body)
+    elif sys.stdout is not None:
+        print(body)
+    return 0
+
+
+def _resolve_ftp(args, use_gui: bool) -> tuple[Optional[int], Optional[str]]:
+    ftp = args.ftp
+    if not args.inject_metrics:
+        return ftp, None
+    if ftp is None:
+        ftp = _load_config().get("ftp")
+    if ftp is None and use_gui:
+        ftp = _gui_prompt_ftp()
+        if ftp is not None:
+            _save_config({"ftp": int(ftp)})
+    if ftp is None:
+        return None, "--inject-metrics needs --ftp (or set it once via the GUI prompt)"
+    return ftp, None
+
+
+def _cmd_patch(args, use_gui: bool) -> int:
     files = list(args.files)
     if not files and use_gui:
         chosen = _gui_pick_files()
@@ -1058,14 +1641,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if use_gui:
             _gui_notify(False, "No files selected.\n\nDrag .fit files onto the launcher.")
         elif sys.stderr is not None:
-            try:
-                parser.print_usage(sys.stderr)
-            except Exception:
-                pass
+            print("no input files", file=sys.stderr)
         return 2
 
     if args.output and len(files) != 1:
         msg = "--output requires exactly one input file"
+        if use_gui:
+            _gui_notify(False, msg)
+        elif sys.stderr is not None:
+            print(msg, file=sys.stderr)
+        return 2
+    if args.output and args.out_dir:
+        msg = "--output and --out-dir cannot be used together"
         if use_gui:
             _gui_notify(False, msg)
         elif sys.stderr is not None:
@@ -1086,39 +1673,60 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(msg, file=sys.stderr)
         return 2
 
-    ftp = args.ftp
-    if args.inject_metrics and ftp is None:
-        ftp = _load_config().get("ftp")
-        if ftp is None and use_gui:
-            ftp = _gui_prompt_ftp()
-            if ftp is not None:
-                _save_config({"ftp": int(ftp)})
-        if ftp is None:
-            msg = "--inject-metrics needs --ftp (or set it once via the GUI prompt)"
-            if use_gui:
-                _gui_notify(False, msg)
-            elif sys.stderr is not None:
-                print(msg, file=sys.stderr)
-            return 2
+    ftp, err = _resolve_ftp(args, use_gui)
+    if err is not None:
+        if use_gui:
+            _gui_notify(False, err)
+        elif sys.stderr is not None:
+            print(err, file=sys.stderr)
+        return 2
+
+    if args.inject_te_approx and not args.inject_metrics:
+        msg = "--inject-te-approx requires --inject-metrics (and --ftp, --resting-hr, --max-hr)"
+        if use_gui:
+            _gui_notify(False, msg)
+        elif sys.stderr is not None:
+            print(msg, file=sys.stderr)
+        return 2
+    if args.inject_te_approx:
+        for required in ("resting_hr", "max_hr"):
+            if getattr(args, required) is None:
+                msg = f"--inject-te-approx requires --{required.replace('_','-')}"
+                if use_gui:
+                    _gui_notify(False, msg)
+                elif sys.stderr is not None:
+                    print(msg, file=sys.stderr)
+                return 2
 
     tz = timezone.utc if args.utc else None
     lines: list[str] = []
     ok = True
+    out_dir = Path(args.out_dir) if args.out_dir else None
+    if out_dir:
+        out_dir.mkdir(parents=True, exist_ok=True)
     for path in files:
         try:
+            output_path = args.output
+            if out_dir is not None:
+                src = Path(path)
+                output_path = str(out_dir / (src.stem + "_fixed" + src.suffix))
             r = fix_fit(
                 path,
-                output_path=args.output,
+                output_path=output_path,
                 tz=tz,
                 overwrite=args.overwrite,
                 in_place=args.in_place,
                 write_when_unchanged=args.write_when_unchanged,
+                profile=args.profile,
                 mimic_zwift=args.mimic_zwift,
                 mimic_garmin=args.mimic_garmin,
                 inject_metrics=args.inject_metrics,
                 ftp=ftp,
             )
-            lines.append(_format_report(r))
+            if args.inject_te_approx:
+                lines.append(_format_report(r) + "\n      (approximate TE injection not yet implemented in v2; TODO)")
+            else:
+                lines.append(_format_report(r))
         except Exception as e:
             ok = False
             name = os.path.basename(str(path))
@@ -1135,6 +1743,40 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             except Exception:
                 pass
     return 0 if ok else 1
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = _build_arg_parser()
+    use_gui = not _has_console()
+    raw = list(sys.argv[1:]) if argv is None else list(argv)
+    known = {"analyze", "patch", "compare", "matrix"}
+    first_positional = next((a for a in raw if not a.startswith("-")), None)
+    if first_positional not in known and not any(a in ("-h", "--help", "--version") for a in raw):
+        raw = ["patch"] + raw
+    elif not raw:
+        raw = ["patch"]
+
+    try:
+        args = parser.parse_args(raw)
+    except SystemExit as e:
+        code = int(e.code) if isinstance(e.code, int) else 2
+        if use_gui and code != 0:
+            _gui_notify(False, "Invalid arguments.")
+        return code
+    except Exception as e:
+        if use_gui:
+            _gui_notify(False, f"Argument parsing failed: {e}")
+        return 2
+
+    use_gui = use_gui and not getattr(args, "no_gui", False)
+    cmd = args.command or "patch"
+    if cmd == "analyze":
+        return _cmd_analyze(args, use_gui)
+    if cmd == "compare":
+        return _cmd_compare(args, use_gui)
+    if cmd == "matrix":
+        return _cmd_matrix(args, use_gui)
+    return _cmd_patch(args, use_gui)
 
 
 if __name__ == "__main__":

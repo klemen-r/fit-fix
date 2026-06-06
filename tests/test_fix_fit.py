@@ -1046,3 +1046,187 @@ def test_compute_metrics_requires_positive_ftp() -> None:
 def test_inject_metrics_without_ftp_raises() -> None:
     with pytest.raises(FitError, match="ftp"):
         fix_fit_bytes(_broken_mywhoosh_bytes(), inject_metrics=True)
+
+
+def test_profile_garmin_edge_matches_mimic_garmin() -> None:
+    src = _make_fit(
+        session_start=SESSION_START,
+        session_elapsed_ms=ELAPSED_MS,
+        session_ts=SESSION_END,
+        activity_ts=SESSION_END,
+        activity_local_ts=SESSION_END + 7200,
+        file_id=(331, 3570, 3313379353),
+    )
+    a, _ = fix_fit_bytes(src, profile="garmin-edge")
+    b, _ = fix_fit_bytes(src, mimic_garmin=True)
+    assert a == b
+
+
+def test_profile_zwift_matches_mimic_zwift() -> None:
+    src = _make_fit(
+        session_start=SESSION_START,
+        session_elapsed_ms=ELAPSED_MS,
+        session_ts=SESSION_END,
+        activity_ts=SESSION_END,
+        activity_local_ts=SESSION_END + 7200,
+        file_id=(331, 3570, 3313379353),
+    )
+    a, _ = fix_fit_bytes(src, profile="zwift")
+    b, _ = fix_fit_bytes(src, mimic_zwift=True)
+    assert a == b
+
+
+def test_unknown_profile_raises() -> None:
+    with pytest.raises(FitError, match="unknown profile"):
+        fix_fit_bytes(_broken_mywhoosh_bytes(), profile="bogus")
+
+
+def test_profile_and_mimic_together_raises() -> None:
+    with pytest.raises(FitError, match="cannot be combined"):
+        fix_fit_bytes(_broken_mywhoosh_bytes(), profile="zwift", mimic_zwift=True)
+
+
+def test_profile_rouvy_patches_file_id() -> None:
+    from fix_fit import ROUVY_MANUFACTURER
+
+    src = _make_fit(
+        session_start=SESSION_START,
+        session_elapsed_ms=ELAPSED_MS,
+        session_ts=SESSION_END,
+        activity_ts=SESSION_END,
+        activity_local_ts=SESSION_END + 7200,
+        file_id=(331, 3570, 3313379353),
+    )
+    fixed, _ = fix_fit_bytes(src, profile="rouvy")
+    parsed = _parse_file_id(fixed)
+    assert parsed == (ROUVY_MANUFACTURER, 0, 0)
+
+
+def test_analyze_mywhoosh_detects_source_and_unix_shift() -> None:
+    from fix_fit import analyze_fit
+
+    r = analyze_fit(_broken_mywhoosh_bytes())
+    assert r["sessions"]
+    a = r["activity"]
+    assert a["local_timestamp_unix_shifted"] is True
+    assert any("Unix-shifted" in w for w in r["warnings"])
+
+
+def test_analyze_correct_file_no_warnings() -> None:
+    from fix_fit import analyze_fit
+
+    r = analyze_fit(_correct_bytes())
+    assert r["activity"]["local_timestamp_unix_shifted"] is False
+    assert all("Unix-shifted" not in w for w in r["warnings"])
+
+
+def test_analyze_reports_message_counts() -> None:
+    from fix_fit import analyze_fit, MSG_SESSION, MSG_ACTIVITY
+
+    r = analyze_fit(_broken_mywhoosh_bytes())
+    counts = r["message_counts"]
+    assert counts.get(MSG_SESSION) == 1
+    assert counts.get(MSG_ACTIVITY) == 1
+
+
+def test_compare_emits_markdown_table(tmp_path: Path) -> None:
+    from fix_fit import compare_fits
+
+    a = tmp_path / "a.fit"
+    b = tmp_path / "b.fit"
+    a.write_bytes(_broken_mywhoosh_bytes())
+    b.write_bytes(_correct_bytes())
+    md = compare_fits([a, b])
+    assert "# FIT comparison" in md
+    assert "| field |" in md
+    assert "| source |" in md
+    assert "Message types" in md
+
+
+def test_matrix_creates_six_variants_and_doc(tmp_path: Path) -> None:
+    from fix_fit import build_test_matrix
+
+    src = tmp_path / "ride.fit"
+    src.write_bytes(_broken_mywhoosh_bytes())
+    out_dir = tmp_path / "variants"
+    result = build_test_matrix(src, out_dir)
+    assert len(result["results"]) == 6
+    files = sorted(p.name for p in out_dir.iterdir())
+    assert "test_matrix.md" in files
+    expected_variants = [
+        "01_timestamp_fixed_only.fit",
+        "02_garmin_edge_indoor.fit",
+        "03_garmin_forerunner_indoor.fit",
+        "04_zwift_virtual.fit",
+        "05_rouvy_virtual.fit",
+        "06_tacx_indoor.fit",
+    ]
+    for name in expected_variants:
+        assert (out_dir / name).is_file()
+
+
+def test_matrix_md_has_test_procedure(tmp_path: Path) -> None:
+    from fix_fit import build_test_matrix
+
+    src = tmp_path / "ride.fit"
+    src.write_bytes(_broken_mywhoosh_bytes())
+    out_dir = tmp_path / "v"
+    build_test_matrix(src, out_dir)
+    md = (out_dir / "test_matrix.md").read_text(encoding="utf-8")
+    assert "Manual Garmin Connect test procedure" in md
+    assert "Acute Load" in md
+    assert "Recovery Time" in md
+
+
+def test_main_analyze_subcommand_json(tmp_path: Path) -> None:
+    from fix_fit import main
+
+    src = tmp_path / "ride.fit"
+    src.write_bytes(_broken_mywhoosh_bytes())
+    out_json = tmp_path / "out.json"
+    rc = main(["analyze", str(src), "--json", str(out_json), "--no-gui"])
+    assert rc == 0
+    payload = out_json.read_text(encoding="utf-8")
+    assert "source_heuristic" in payload
+    assert "warnings" in payload
+
+
+def test_main_compare_subcommand_md(tmp_path: Path) -> None:
+    from fix_fit import main
+
+    a = tmp_path / "a.fit"
+    b = tmp_path / "b.fit"
+    a.write_bytes(_broken_mywhoosh_bytes())
+    b.write_bytes(_correct_bytes())
+    out_md = tmp_path / "cmp.md"
+    rc = main(["compare", str(a), str(b), "--md", str(out_md), "--no-gui"])
+    assert rc == 0
+    assert "# FIT comparison" in out_md.read_text(encoding="utf-8")
+
+
+def test_main_matrix_subcommand(tmp_path: Path) -> None:
+    from fix_fit import main
+
+    src = tmp_path / "ride.fit"
+    src.write_bytes(_broken_mywhoosh_bytes())
+    out_dir = tmp_path / "v"
+    rc = main(["matrix", str(src), "--out-dir", str(out_dir), "--no-gui"])
+    assert rc == 0
+    assert (out_dir / "test_matrix.md").is_file()
+
+
+def test_main_legacy_invocation_defaults_to_patch(tmp_path: Path) -> None:
+    from fix_fit import main
+
+    src = tmp_path / "ride.fit"
+    src.write_bytes(_broken_mywhoosh_bytes())
+    rc = main([str(src), "--no-gui"])
+    assert rc == 0
+    assert (tmp_path / "ride_fixed.fit").is_file()
+
+
+def test_inject_te_approx_requires_inject_metrics() -> None:
+    from fix_fit import main
+
+    rc = main(["patch", "--inject-te-approx", "--no-gui", "missing.fit"])
+    assert rc == 2
