@@ -1,28 +1,35 @@
 # fit-fix
 
-A minimal MyWhoosh `.fit` converter by **not_kler**.
+A focused MyWhoosh `.fit` normalizer by **not_kler**.
 
-It changes exactly two `file_id` fields:
+MyWhoosh exports contain metadata and summary defects that Garmin Connect web
+mostly tolerates but Garmin watches may not. Relabeling the device alone does
+not repair those defects.
 
-- manufacturer: MyWhoosh (`331`) to Garmin (`1`)
-- product: Edge 1050 (`4440`)
+## What it fixes
 
-Apart from the required file CRC, everything else remains byte-for-byte
-unchanged. The converter validates the FIT structure and CRC before writing.
+- identifies the activity as Garmin Edge 1050
+- replaces the malformed event stream with `timer/start` and `timer/stop_all`
+- rebuilds dense lap and session summaries from the existing activity data
+- fixes session, activity, and local end timestamps
+- adds standard creator-device and sport metadata
+- removes MyWhoosh-only developer metadata
+- removes redundant enhanced fields produced by some online converters
+- preserves the original record streams: timestamps, HR, cadence, power,
+  distance, speed, altitude, and position
+
+Original files are never overwritten.
 
 ## Windows
 
-Drag one or more MyWhoosh `.fit` files onto
-`Convert MyWhoosh to Edge 1050.bat`.
+Drag one or more `.fit` files onto `Convert MyWhoosh to Edge 1050.bat`, or
+double-click the launcher and select files.
 
-The converted file appears beside the original as:
+The normalized file appears beside the original:
 
 ```text
-ride_edge1050.fit
+ride_garmin.fit
 ```
-
-You can also double-click the launcher and select files. Original files are never
-overwritten.
 
 ## Command line
 
@@ -32,17 +39,12 @@ Python 3.10 or newer is required. There are no runtime dependencies.
 python fix_fit.py ride.fit
 ```
 
-Multiple files can be converted in one command:
+## Limits
 
-```text
-python fix_fit.py ride1.fit ride2.fit
-```
-
-## What it does not do
-
-It does not rewrite timestamps, inject metrics, add device records, or modify the
-activity stream. Garmin Connect acceptance and training-load processing are not
-guaranteed.
+This repairs the FIT structure that a watch reads. Garmin Connect may calculate
+proprietary metrics such as Training Effect, Acute Load, and Recovery Time on
+its servers; those values cannot be recreated accurately from the activity file
+alone.
 
 ## Development
 
