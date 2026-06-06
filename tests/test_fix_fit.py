@@ -199,7 +199,7 @@ def test_normalizes_watch_facing_structure() -> None:
     assert counts == {
         MSG_FILE_ID: 1,
         MSG_FILE_CREATOR: 1,
-        MSG_DEVICE_INFO: 1,
+        MSG_DEVICE_INFO: 2,
         MSG_SPORT: 1,
         MSG_EVENT: 2,
         MSG_RECORD: 3,
@@ -218,6 +218,25 @@ def test_normalizes_watch_facing_structure() -> None:
     ]
     assert [_read_uint(message, 253) for message in events] == [START, END]
     assert [_read_uint(message, 3) for message in events] == [0, 0]
+    devices = [
+        message for message in messages if message.global_message == MSG_DEVICE_INFO
+    ]
+    assert [_read_uint(message, 253) for message in devices] == [START, END]
+    assert [_read_uint(message, 5) for message in devices] == [29, 29]
+    assert [message.global_message for message in messages[:5]] == [
+        MSG_FILE_ID,
+        MSG_FILE_CREATOR,
+        MSG_EVENT,
+        MSG_DEVICE_INFO,
+        MSG_SPORT,
+    ]
+    assert [message.global_message for message in messages[-5:]] == [
+        MSG_EVENT,
+        MSG_DEVICE_INFO,
+        MSG_LAP,
+        MSG_SESSION,
+        MSG_ACTIVITY,
+    ]
 
     lap = _one(messages, MSG_LAP)
     session = _one(messages, MSG_SESSION)

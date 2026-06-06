@@ -16,10 +16,10 @@ not repair those defects.
 - keeps record timestamps unchanged while repairing MyWhoosh's broken summary
   times: lap end, session end, activity end, event times, and the Unix-epoch-
   shifted local timestamp
-- adds standard creator-device and sport metadata
+- adds Garmin-style start/end creator-device metadata and sport metadata
 - removes MyWhoosh-only developer metadata
 - removes redundant enhanced fields produced by some online converters
-- canonicalizes retained messages to Garmin-native little-endian definitions
+- canonicalizes retained messages to little-endian definitions
 - preserves the original record streams: timestamps, HR, cadence, power,
   distance, speed, altitude, and position
 - rejects unrelated Garmin and multi-session files instead of silently

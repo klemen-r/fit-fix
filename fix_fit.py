@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, Sequence
 
-__version__ = "3.2.0"
+__version__ = "3.2.1"
 
 FIT_EPOCH = datetime(1989, 12, 31, tzinfo=timezone.utc)
 FIT_SIGNATURE = b".FIT"
@@ -724,6 +724,15 @@ def _build_standard_messages(messages: Sequence[Message]) -> list[Message]:
     )
 
     serial_number = _read_uint(file_id, 3)
+    file_creator = next(
+        (
+            _dedupe(message)
+            for message in messages
+            if message.global_message == MSG_FILE_CREATOR
+        ),
+        None,
+    )
+    creator_version = _read_uint(file_creator, 0) if file_creator is not None else None
     device_fields = [
         _pack_field("<", F_TIMESTAMP, TYPE_UINT32, start_timestamp),
         _pack_field("<", 2, TYPE_UINT16, GARMIN_MANUFACTURER),
@@ -733,7 +742,10 @@ def _build_standard_messages(messages: Sequence[Message]) -> list[Message]:
     ]
     if serial_number is not None:
         device_fields.insert(1, _pack_field("<", 3, TYPE_UINT32Z, serial_number))
-    device_info = _message(MSG_DEVICE_INFO, device_fields)
+    if creator_version is not None:
+        device_fields.insert(4, _pack_field("<", 5, TYPE_UINT16, creator_version))
+    start_device_info = _message(MSG_DEVICE_INFO, device_fields)
+    end_device_info = _replace_uint(start_device_info, F_TIMESTAMP, end_timestamp)
 
     lap_fields = [
         _pack_field("<", F_TIMESTAMP, TYPE_UINT32, end_timestamp),
@@ -832,18 +844,10 @@ def _build_standard_messages(messages: Sequence[Message]) -> list[Message]:
         ],
     )
 
-    file_creator = next(
-        (
-            _dedupe(message)
-            for message in messages
-            if message.global_message == MSG_FILE_CREATOR
-        ),
-        None,
-    )
     prefix = [file_id]
     if file_creator is not None:
         prefix.append(file_creator)
-    prefix += [device_info, sport, event_start]
+    prefix += [event_start, start_device_info, sport]
 
     preserved = [
         _dedupe(message)
@@ -867,7 +871,7 @@ def _build_standard_messages(messages: Sequence[Message]) -> list[Message]:
         prefix
         + preserved
         + records
-        + [event_stop, normalized_lap, normalized_session, activity]
+        + [event_stop, end_device_info, normalized_lap, normalized_session, activity]
     )
 
 
