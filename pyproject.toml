@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fit-fix"
-version = "2.0.2"
-description = "Analyze, repair, and re-shape MyWhoosh FIT exports for Garmin Connect compatibility"
+version = "3.0.0"
+description = "Minimal MyWhoosh to Garmin Edge 1050 FIT converter"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
 authors = [{ name = "not_kler" }]
-keywords = ["fit", "garmin", "mywhoosh", "zwift", "cycling"]
+keywords = ["fit", "garmin", "mywhoosh", "cycling"]
 classifiers = [
     "Environment :: Console",
     "Operating System :: OS Independent",
@@ -27,11 +27,8 @@ fit-fix = "fix_fit:main"
 
 [project.optional-dependencies]
 dev = [
-    "build",
-    "mypy",
     "pytest",
     "ruff",
-    "twine",
 ]
 
 [tool.setuptools]

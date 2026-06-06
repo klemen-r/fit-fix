@@ -6,12 +6,7 @@ build/
 dist/
 .venv/
 venv/
-.env
 .pytest_cache/
-.mypy_cache/
 .ruff_cache/
-.coverage
-htmlcov/
 
 *.fit
-fit-fix.cfg

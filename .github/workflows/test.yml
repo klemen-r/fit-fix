@@ -9,42 +9,14 @@ permissions:
   contents: read
 
 jobs:
-  lint:
+  test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.14"
+          python-version: "3.10"
       - run: python -m pip install .[dev]
       - run: python -m ruff check .
-      - run: python -m mypy --check-untyped-defs fix_fit.py tests
-
-  test:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
-        with:
-          python-version: ${{ matrix.python-version }}
-      - run: python -m pip install . pytest
       - run: python -m pytest -q
-      - run: fit-fix --version
-
-  package:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.14"
-      - run: python -m pip install build twine
-      - run: python -m build
-      - run: python -m twine check dist/*
-      - run: python -m pip install dist/*.whl
       - run: fit-fix --version
