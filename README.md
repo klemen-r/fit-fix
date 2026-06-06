@@ -11,14 +11,19 @@ not repair those defects.
 - identifies the activity as Garmin Edge 1050
 - replaces the malformed event stream with `timer/start` and `timer/stop_all`
 - rebuilds dense lap and session summaries from the existing activity data
+- adds standard descent, total-work, normalized-power, end-position, and
+  timer-trigger fields
 - keeps record timestamps unchanged while repairing MyWhoosh's broken summary
   times: lap end, session end, activity end, event times, and the Unix-epoch-
   shifted local timestamp
 - adds standard creator-device and sport metadata
 - removes MyWhoosh-only developer metadata
 - removes redundant enhanced fields produced by some online converters
+- canonicalizes retained messages to Garmin-native little-endian definitions
 - preserves the original record streams: timestamps, HR, cadence, power,
   distance, speed, altitude, and position
+- rejects unrelated Garmin and multi-session files instead of silently
+  discarding their structure
 
 Original files are never overwritten.
 

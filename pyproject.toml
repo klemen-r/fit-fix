@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fit-fix"
-version = "3.1.1"
+version = "3.2.0"
 description = "Normalize MyWhoosh FIT activities for Garmin watches"
 readme = "README.md"
 license = "MIT"

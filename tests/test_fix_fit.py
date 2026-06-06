@@ -23,6 +23,7 @@ from fix_fit import (
     MSG_SESSION,
     MSG_SPORT,
     MYWHOOSH_MANUFACTURER,
+    MYWHOOSH_SERIAL,
     TYPE_ENUM,
     TYPE_SINT32,
     TYPE_UINT8,
@@ -35,6 +36,7 @@ from fix_fit import (
     _encode_fit,
     _pack_field,
     _parse_fit,
+    _read_sint32,
     _read_uint,
     convert_file,
     convert_fit_bytes,
@@ -45,11 +47,11 @@ START = 1_100_000_000
 END = START + 3
 
 
-def _header(size: int = 14) -> bytes:
+def _header(size: int = 14, profile_version: int = 21166) -> bytes:
     header = bytearray(size)
     header[0] = size
     header[1] = 0x20
-    struct.pack_into("<H", header, 2, 21166)
+    struct.pack_into("<H", header, 2, profile_version)
     header[8:12] = b".FIT"
     return bytes(header)
 
@@ -58,7 +60,10 @@ def _m(global_message: int, specs: list[tuple[int, int, int]], endian: str) -> M
     return Message(
         global_message,
         endian,
-        tuple(_pack_field(endian, number, base_type, value) for number, base_type, value in specs),
+        tuple(
+            _pack_field(endian, number, base_type, value)
+            for number, base_type, value in specs
+        ),
     )
 
 
@@ -72,6 +77,11 @@ def _broken_activity(
     lap_timestamp: int = END,
     summary_timestamp: int = START,
     local_timestamp: int = START + 631_065_600,
+    serial: int = MYWHOOSH_SERIAL,
+    record_timestamps: tuple[int, int, int] = (START, START + 1, START + 2),
+    summary_calories: int = 30,
+    summary_distance: int = 2000,
+    profile_version: int = 21166,
 ) -> bytes:
     messages = [
         _m(
@@ -80,7 +90,7 @@ def _broken_activity(
                 (0, TYPE_ENUM, 4),
                 (1, TYPE_UINT16, manufacturer),
                 (2, TYPE_UINT16, product),
-                (3, TYPE_UINT32Z, 123456789),
+                (3, TYPE_UINT32Z, serial),
                 (4, TYPE_UINT32, START),
             ],
             endian,
@@ -90,13 +100,14 @@ def _broken_activity(
         _m(MSG_FIELD_DESCRIPTION, [(0, TYPE_UINT8, 0)], endian),
         _m(MSG_EVENT, [(253, TYPE_UINT32, START)], endian),
     ]
+    altitudes = (2500, 2510, 2500)
     for index in range(3):
         fields = [
-            (253, TYPE_UINT32, START + index),
+            (253, TYPE_UINT32, record_timestamps[index]),
             (3, TYPE_UINT8, 100 + index),
             (5, TYPE_UINT32, 1000 + index * 500),
             (4, TYPE_UINT8, 80 + index),
-            (2, TYPE_UINT16, 2500 + index),
+            (2, TYPE_UINT16, altitudes[index]),
             (0, TYPE_SINT32, 500_000_000 + index),
             (1, TYPE_SINT32, 100_000_000 + index),
             (7, TYPE_UINT16, 150 + index),
@@ -138,7 +149,7 @@ def _broken_activity(
                     (7, TYPE_UINT32, 3000),
                     (5, TYPE_ENUM, 2),
                     (6, TYPE_ENUM, 58),
-                    (11, TYPE_UINT16, 30),
+                    (11, TYPE_UINT16, summary_calories),
                     (26, TYPE_UINT16, 1),
                     (22, TYPE_UINT16, 7),
                     (18, TYPE_UINT8, 81),
@@ -148,7 +159,7 @@ def _broken_activity(
                     (21, TYPE_UINT16, 152),
                     (14, TYPE_UINT16, 8001),
                     (17, TYPE_UINT8, 102),
-                    (9, TYPE_UINT32, 2000),
+                    (9, TYPE_UINT32, summary_distance),
                 ]
             ),
             (DeveloperField(0, 4, 0, b"test"),),
@@ -167,7 +178,7 @@ def _broken_activity(
             endian,
         ),
     ]
-    return _encode_fit(_header(header_size), messages)
+    return _encode_fit(_header(header_size, profile_version), messages)
 
 
 def _messages(data: bytes) -> list[Message]:
@@ -175,7 +186,9 @@ def _messages(data: bytes) -> list[Message]:
 
 
 def _one(messages: list[Message], global_message: int) -> Message:
-    return next(message for message in messages if message.global_message == global_message)
+    return next(
+        message for message in messages if message.global_message == global_message
+    )
 
 
 def test_normalizes_watch_facing_structure() -> None:
@@ -204,6 +217,7 @@ def test_normalizes_watch_facing_structure() -> None:
         (0, 4),
     ]
     assert [_read_uint(message, 253) for message in events] == [START, END]
+    assert [_read_uint(message, 3) for message in events] == [0, 0]
 
     lap = _one(messages, MSG_LAP)
     session = _one(messages, MSG_SESSION)
@@ -214,7 +228,15 @@ def test_normalizes_watch_facing_structure() -> None:
     assert _read_uint(lap, 9) == 2000
     assert _read_uint(lap, 11) == 30
     assert _read_uint(lap, 19) == 151
+    assert _read_uint(lap, 22) == 2
+    assert _read_uint(lap, 33) == 151
+    assert _read_uint(lap, 41) == 453
     assert _read_uint(session, 15) == 8002
+    assert _read_uint(session, 23) == 2
+    assert _read_uint(session, 34) == 151
+    assert _read_uint(session, 48) == 453
+    assert _read_sint32(session, 38) == 500_000_002
+    assert _read_sint32(session, 39) == 100_000_002
     assert abs(_read_uint(activity, 5) - END) <= 15 * 60 * 60
     assert not session.developer_fields
 
@@ -271,7 +293,9 @@ def test_supported_headers_and_architectures(header_size: int, endian: str) -> N
     normalized = convert_fit_bytes(
         _broken_activity(header_size=header_size, endian=endian)
     )
-    assert _read_uint(_one(_messages(normalized), MSG_FILE_ID), 2) == EDGE_1050_PRODUCT
+    messages = _messages(normalized)
+    assert _read_uint(_one(messages, MSG_FILE_ID), 2) == EDGE_1050_PRODUCT
+    assert all(message.endian == "<" for message in messages)
 
 
 def test_normalization_is_idempotent() -> None:
@@ -279,9 +303,103 @@ def test_normalization_is_idempotent() -> None:
     assert convert_fit_bytes(once) == once
 
 
+def test_equivalent_online_conversion_produces_same_canonical_output() -> None:
+    clean_source = _broken_activity(endian="<", profile_version=21158)
+    online_conversion = _broken_activity(
+        manufacturer=GARMIN_MANUFACTURER,
+        product=EDGE_1050_PRODUCT,
+        endian=">",
+        profile_version=21205,
+    )
+
+    assert convert_fit_bytes(clean_source) == convert_fit_bytes(online_conversion)
+
+
 def test_other_garmin_product_is_rejected() -> None:
-    with pytest.raises(FitError, match="not an Edge 1050"):
-        convert_fit_bytes(_broken_activity(manufacturer=GARMIN_MANUFACTURER, product=3121))
+    with pytest.raises(FitError, match="not recognized"):
+        convert_fit_bytes(
+            _broken_activity(manufacturer=GARMIN_MANUFACTURER, product=3121)
+        )
+
+
+def test_genuine_edge_1050_file_is_rejected_instead_of_flattened() -> None:
+    with pytest.raises(FitError, match="not recognized"):
+        convert_fit_bytes(
+            _broken_activity(
+                manufacturer=GARMIN_MANUFACTURER,
+                product=EDGE_1050_PRODUCT,
+                serial=123456789,
+            )
+        )
+
+
+def test_multiple_laps_are_rejected_instead_of_silently_collapsed() -> None:
+    messages = _messages(_broken_activity())
+    messages.append(_one(messages, MSG_LAP))
+    with pytest.raises(FitError, match="exactly one global message 19"):
+        convert_fit_bytes(_encode_fit(_header(), messages))
+
+
+def test_non_monotonic_record_timestamps_are_rejected() -> None:
+    with pytest.raises(FitError, match="strictly increasing"):
+        convert_fit_bytes(
+            _broken_activity(record_timestamps=(START, START + 2, START + 1))
+        )
+
+
+def test_record_without_timestamp_is_rejected() -> None:
+    messages = _messages(_broken_activity())
+    record_index = next(
+        index
+        for index, message in enumerate(messages)
+        if message.global_message == MSG_RECORD
+    )
+    record = messages[record_index]
+    messages[record_index] = Message(
+        record.global_message,
+        record.endian,
+        tuple(field for field in record.fields if field.number != 253),
+        record.developer_fields,
+    )
+
+    with pytest.raises(FitError, match="every record"):
+        convert_fit_bytes(_encode_fit(_header(), messages))
+
+
+def test_invalid_fit_values_are_not_used_as_metrics() -> None:
+    normalized = _messages(
+        convert_fit_bytes(
+            _broken_activity(
+                summary_calories=0xFFFF,
+                summary_distance=0xFFFFFFFF,
+            )
+        )
+    )
+    session = _one(normalized, MSG_SESSION)
+    lap = _one(normalized, MSG_LAP)
+
+    assert _read_uint(session, 11) is None
+    assert _read_uint(lap, 11) is None
+    assert _read_uint(session, 9) == 2000
+    assert _read_uint(lap, 9) == 2000
+
+
+def test_invalid_fit_sentinels_decode_as_missing() -> None:
+    message = _m(
+        MSG_RECORD,
+        [
+            (0, TYPE_ENUM, 0xFF),
+            (1, TYPE_UINT8, 0xFF),
+            (2, TYPE_UINT16, 0xFFFF),
+            (3, TYPE_UINT32, 0xFFFFFFFF),
+            (4, TYPE_UINT32Z, 0),
+            (5, TYPE_SINT32, 0x7FFFFFFF),
+        ],
+        "<",
+    )
+
+    assert all(_read_uint(message, number) is None for number in range(5))
+    assert _read_sint32(message, 5) is None
 
 
 def test_bad_crc_is_rejected() -> None:
@@ -304,7 +422,9 @@ def test_convert_file_preserves_source_and_avoids_collisions(tmp_path: Path) -> 
     assert second.name == "ride_garmin_2.fit"
 
 
-def test_main_converts_multiple_files(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_main_converts_multiple_files(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     first = tmp_path / "one.fit"
     second = tmp_path / "two.fit"
     first.write_bytes(_broken_activity())
