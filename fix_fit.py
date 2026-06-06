@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, Sequence
 
-__version__ = "3.1.0"
+__version__ = "3.1.1"
 
 FIT_EPOCH = datetime(1989, 12, 31, tzinfo=timezone.utc)
 FIT_SIGNATURE = b".FIT"
@@ -415,6 +415,27 @@ def _local_timestamp(end_timestamp: int) -> int:
     return end_timestamp + int(offset.total_seconds())
 
 
+def _activity_times(
+    session: Message,
+    lap: Message,
+    record_timestamps: Sequence[int],
+) -> tuple[int, int, int, int]:
+    """Repair MyWhoosh summary times without shifting the record stream."""
+    start_timestamp = _read_uint(session, 2) or record_timestamps[0]
+    elapsed_ms = _summary_value(session, 7)
+    timer_ms = _summary_value(session, 8, elapsed_ms)
+    if elapsed_ms is None or timer_ms is None:
+        raise FitError("session has no elapsed/timer time")
+
+    expected_end = start_timestamp + round(elapsed_ms / 1000)
+    lap_end = _read_uint(lap, F_TIMESTAMP)
+    end_candidates = [record_timestamps[-1], expected_end]
+    if lap_end is not None and abs(lap_end - expected_end) <= 60:
+        end_candidates.append(lap_end)
+    end_timestamp = max(end_candidates)
+    return start_timestamp, end_timestamp, elapsed_ms, timer_ms
+
+
 def _build_standard_messages(messages: Sequence[Message]) -> list[Message]:
     file_id = _dedupe(_required(messages, MSG_FILE_ID))
     manufacturer = _read_uint(file_id, 1)
@@ -435,17 +456,9 @@ def _build_standard_messages(messages: Sequence[Message]) -> list[Message]:
     record_timestamps = _record_values(records, F_TIMESTAMP)
     if not record_timestamps:
         raise FitError("records have no timestamps")
-    start_timestamp = _read_uint(session, 2) or record_timestamps[0]
-    elapsed_ms = _summary_value(session, 7)
-    timer_ms = _summary_value(session, 8, elapsed_ms)
-    if elapsed_ms is None or timer_ms is None:
-        raise FitError("session has no elapsed/timer time")
-    expected_end = start_timestamp + round(elapsed_ms / 1000)
-    lap_end = _read_uint(lap, F_TIMESTAMP)
-    end_candidates = [record_timestamps[-1], expected_end]
-    if lap_end is not None and abs(lap_end - expected_end) <= 60:
-        end_candidates.append(lap_end)
-    end_timestamp = max(end_candidates)
+    start_timestamp, end_timestamp, elapsed_ms, timer_ms = _activity_times(
+        session, lap, record_timestamps
+    )
 
     distances = _record_values(records, 5)
     speeds = _record_values(records, 6)

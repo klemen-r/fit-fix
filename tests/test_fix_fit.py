@@ -69,6 +69,9 @@ def _broken_activity(
     endian: str = "<",
     header_size: int = 14,
     redundant_enhanced_fields: bool = True,
+    lap_timestamp: int = END,
+    summary_timestamp: int = START,
+    local_timestamp: int = START + 631_065_600,
 ) -> bytes:
     messages = [
         _m(
@@ -108,7 +111,7 @@ def _broken_activity(
             MSG_LAP,
             [
                 (2, TYPE_UINT32, START),
-                (253, TYPE_UINT32, END),
+                (253, TYPE_UINT32, lap_timestamp),
                 (8, TYPE_UINT32, 3000),
                 (7, TYPE_UINT32, 3000),
                 (23, TYPE_ENUM, 0),
@@ -129,7 +132,7 @@ def _broken_activity(
             tuple(
                 _pack_field(endian, number, base_type, value)
                 for number, base_type, value in [
-                    (253, TYPE_UINT32, START),
+                    (253, TYPE_UINT32, summary_timestamp),
                     (2, TYPE_UINT32, START),
                     (8, TYPE_UINT32, 3000),
                     (7, TYPE_UINT32, 3000),
@@ -153,13 +156,13 @@ def _broken_activity(
         _m(
             MSG_ACTIVITY,
             [
-                (253, TYPE_UINT32, START),
+                (253, TYPE_UINT32, summary_timestamp),
                 (0, TYPE_UINT32, 3000),
                 (1, TYPE_UINT16, 1),
                 (2, TYPE_ENUM, 0),
                 (3, TYPE_ENUM, 26),
                 (4, TYPE_ENUM, 1),
-                (5, TYPE_UINT32, START + 631_065_600),
+                (5, TYPE_UINT32, local_timestamp),
             ],
             endian,
         ),
@@ -214,6 +217,38 @@ def test_normalizes_watch_facing_structure() -> None:
     assert _read_uint(session, 15) == 8002
     assert abs(_read_uint(activity, 5) - END) <= 15 * 60 * 60
     assert not session.developer_fields
+
+
+def test_keeps_all_mywhoosh_time_fixes() -> None:
+    poisoned = _broken_activity(
+        lap_timestamp=START + 631_065_600,
+        summary_timestamp=START,
+        local_timestamp=END + 631_065_600,
+    )
+    original_records = [
+        _read_uint(message, 253)
+        for message in _messages(poisoned)
+        if message.global_message == MSG_RECORD
+    ]
+    messages = _messages(convert_fit_bytes(poisoned))
+
+    fixed_records = [
+        _read_uint(message, 253)
+        for message in messages
+        if message.global_message == MSG_RECORD
+    ]
+    events = [message for message in messages if message.global_message == MSG_EVENT]
+    lap = _one(messages, MSG_LAP)
+    session = _one(messages, MSG_SESSION)
+    activity = _one(messages, MSG_ACTIVITY)
+
+    assert fixed_records == original_records
+    assert [_read_uint(message, 253) for message in events] == [START, END]
+    assert _read_uint(lap, 253) == END
+    assert _read_uint(session, 253) == END
+    assert _read_uint(activity, 253) == END
+    assert abs(_read_uint(activity, 5) - END) <= 15 * 60 * 60
+    assert _read_uint(activity, 5) != END + 631_065_600
 
 
 def test_preserves_records_and_removes_redundant_enhanced_fields() -> None:

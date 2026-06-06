@@ -11,7 +11,9 @@ not repair those defects.
 - identifies the activity as Garmin Edge 1050
 - replaces the malformed event stream with `timer/start` and `timer/stop_all`
 - rebuilds dense lap and session summaries from the existing activity data
-- fixes session, activity, and local end timestamps
+- keeps record timestamps unchanged while repairing MyWhoosh's broken summary
+  times: lap end, session end, activity end, event times, and the Unix-epoch-
+  shifted local timestamp
 - adds standard creator-device and sport metadata
 - removes MyWhoosh-only developer metadata
 - removes redundant enhanced fields produced by some online converters
