@@ -892,9 +892,9 @@ fn read_valid_manifest(entry: &Entry) -> Result<Option<TokenManifest>> {
 fn spawn_auth_bridge() -> Result<Child> {
     let script = auth_bridge_path()?;
     let mut failures = Vec::new();
-    for (program, prefix) in [("python", None), ("py", Some("-3"))] {
-        let mut command = Command::new(program);
-        if let Some(argument) = prefix {
+    for candidate in crate::python::candidates() {
+        let mut command = Command::new(&candidate.program);
+        if let Some(argument) = candidate.prefix {
             command.arg(argument);
         }
         command
@@ -906,7 +906,7 @@ fn spawn_auth_bridge() -> Result<Child> {
         command.creation_flags(CREATE_NO_WINDOW);
         match command.spawn() {
             Ok(child) => return Ok(child),
-            Err(error) => failures.push(format!("{program}: {error}")),
+            Err(error) => failures.push(format!("{}: {error}", candidate.program.display())),
         }
     }
     bail!(

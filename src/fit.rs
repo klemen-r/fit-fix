@@ -121,17 +121,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reads_generated_variant_when_present() {
-        let path = Path::new("outputs/garmin_donor_spoof/conservative_garmin_device_spoof.fit");
-        if !path.is_file() {
-            return;
-        }
-        let value = fingerprint(path).expect("generated fixture should parse");
-        assert_eq!(value.duration_seconds, Some(4859.0));
-        assert_eq!(value.distance_meters, Some(40138.58));
-    }
-
-    #[test]
     fn rejects_non_fit_path() {
         let error = fingerprint(Path::new("README.md")).expect_err("README is not FIT");
         assert!(error.to_string().contains("not a FIT"));

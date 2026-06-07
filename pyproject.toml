@@ -30,9 +30,6 @@ dev = [
     "pytest",
     "ruff",
 ]
-analysis = [
-    "garmin-fit-sdk>=21.205",
-]
 auth = [
     "garminconnect>=0.3.5",
     "curl-cffi>=0.15",
@@ -41,12 +38,7 @@ auth = [
 py-modules = [
     "fix_fit",
     "garmin_auth_bridge",
-    "garmin_donor_spoof",
-    "garmin_pipeline",
-    "paired_compare",
-    "profile_config",
-    "variant_rank",
-    "zwift_compare",
+    "garmin_converter",
 ]
 
 [tool.pytest.ini_options]

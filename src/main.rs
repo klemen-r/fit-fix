@@ -4,6 +4,7 @@
 mod convert;
 mod fit;
 mod garmin;
+mod python;
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -205,7 +206,7 @@ impl UploadApp {
             .and_then(Path::parent)
             .unwrap_or_else(|| Path::new("."));
         if let Some(path) = rfd::FileDialog::new()
-            .set_title("Select MyWhoosh FIT or generated Garmin variant")
+            .set_title("Select MyWhoosh FIT")
             .set_directory(initial)
             .add_filter("FIT activity", &["fit"])
             .pick_file()
@@ -381,7 +382,7 @@ fn run_upload(client: &mut GarminClient, path: &Path, tx: &Sender<WorkerMessage>
         if prepared.converted {
             "Uploading converted Garmin FIT..."
         } else {
-            "Uploading selected Garmin variant..."
+            "Uploading..."
         }
         .to_owned(),
     ));
@@ -419,24 +420,7 @@ fn initial_fit() -> Option<PathBuf> {
             return Some(path);
         }
     }
-    let preferred =
-        PathBuf::from("outputs/garmin_donor_spoof/conservative_garmin_device_spoof.fit");
-    if preferred.is_file() {
-        return Some(preferred);
-    }
-    let directory = Path::new("outputs/garmin_donor_spoof");
-    let mut variants: Vec<_> = std::fs::read_dir(directory)
-        .ok()?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.extension()
-                .and_then(|value| value.to_str())
-                .is_some_and(|value| value.eq_ignore_ascii_case("fit"))
-        })
-        .collect();
-    variants.sort();
-    variants.into_iter().next()
+    None
 }
 
 fn display_path(path: &Path) -> String {
