@@ -1,0 +1,31 @@
+name: windows-portable
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - run: cargo test
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo build --release
+      - shell: powershell
+        run: ./scripts/build-portable.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: garmin-fit-upload-windows-x64
+          path: dist/garmin-fit-upload-windows-x64.zip
+      - if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" "dist/garmin-fit-upload-windows-x64.zip" --generate-notes

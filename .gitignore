@@ -4,9 +4,12 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+outputs/
+target/
 .venv/
 venv/
 .pytest_cache/
 .ruff_cache/
+.garminconnect/
 
 *.fit

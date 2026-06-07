@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fit-fix"
-version = "3.2.1"
+version = "3.3.0"
 description = "Normalize MyWhoosh FIT activities for Garmin watches"
 readme = "README.md"
 license = "MIT"
@@ -30,9 +30,16 @@ dev = [
     "pytest",
     "ruff",
 ]
-
+auth = [
+    "garminconnect>=0.3.5",
+    "curl-cffi>=0.15",
+]
 [tool.setuptools]
-py-modules = ["fix_fit"]
+py-modules = [
+    "fix_fit",
+    "garmin_auth_bridge",
+    "garmin_converter",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

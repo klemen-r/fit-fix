@@ -1,64 +1,59 @@
-# fit-fix
+# Garmin FIT Upload
 
-A focused MyWhoosh `.fit` normalizer by **not_kler**.
+A small Windows application that converts a MyWhoosh cycling FIT into a
+Garmin-style indoor-cycling FIT and uploads it to Garmin Connect.
 
-MyWhoosh exports contain metadata and summary defects that Garmin Connect web
-mostly tolerates but Garmin watches may not. Relabeling the device alone does
-not repair those defects.
+## Install
 
-## What it fixes
+1. Download `garmin-fit-upload-windows-x64.zip` from GitHub Releases.
+2. Extract it.
+3. Double-click `Setup.bat`.
+4. If asked, select one activity recorded by your own Garmin watch.
+5. Use the new **Garmin FIT Upload** desktop shortcut.
 
-- identifies the activity as Garmin Edge 1050
-- replaces the malformed event stream with `timer/start` and `timer/stop_all`
-- rebuilds dense lap and session summaries from the existing activity data
-- adds standard descent, total-work, normalized-power, end-position, and
-  timer-trigger fields
-- keeps record timestamps unchanged while repairing MyWhoosh's broken summary
-  times: lap end, session end, activity end, event times, and the Unix-epoch-
-  shifted local timestamp
-- adds Garmin-style start/end creator-device metadata and sport metadata
-- removes MyWhoosh-only developer metadata
-- removes redundant enhanced fields produced by some online converters
-- canonicalizes retained messages to little-endian definitions
-- preserves the original record streams: timestamps, HR, cadence, power,
-  distance, speed, altitude, and position
-- rejects unrelated Garmin and multi-session files instead of silently
-  discarding their structure
+Setup installs only the required Garmin sign-in support for the current Windows
+user. It uses `winget` to install Python when Python 3.10 or newer is unavailable,
+then records the exact configured Python executable for reliable launches.
 
-Original files are never overwritten.
+The selected Garmin activity is stored locally as `garmin-template.fit`. It is a
+binary template containing Garmin-native message structure and device metadata.
+Public manufacturer/product codes alone cannot replace it.
 
-## Windows
+## Use
 
-Drag one or more `.fit` files onto `Convert MyWhoosh to Edge 1050.bat`, or
-double-click the launcher and select files.
+1. Select a raw MyWhoosh FIT.
+2. Click **Convert & Upload**.
+3. Sign in to Garmin Connect when prompted.
 
-The normalized file appears beside the original:
+The app:
 
-```text
-ride_garmin.fit
-```
+- preserves the MyWhoosh ride record stream and summaries
+- sets `sport = cycling` and `sub_sport = indoor_cycling`
+- applies the local Garmin template's identity, creator, device, and timer metadata
+- validates the generated FIT and CRC
+- skips upload when the activity already exists
+- stores reusable sign-in tokens in Windows Credential Manager
 
-## Command line
-
-Python 3.10 or newer is required. There are no runtime dependencies.
-
-```text
-python fix_fit.py ride.fit
-```
+Passwords and MFA codes are never saved.
 
 ## Limits
 
-This repairs the FIT structure that a watch reads. Garmin Connect may calculate
-proprietary metrics such as Training Effect, Acute Load, and Recovery Time on
-its servers; those values cannot be recreated accurately from the activity file
-alone.
+Garmin decides whether Training Effect, Acute Load, Recovery Time, Training
+Status, and Load Focus update. FIT metadata cannot guarantee those results.
+
+Use an activity from your own Garmin watch as the template. Do not publish FIT
+templates because they can contain device serial numbers and personal metadata.
 
 ## Development
 
 ```text
-python -m pip install .[dev]
+python -m pip install .[dev,auth]
 python -m pytest -q
 python -m ruff check .
+cargo test
+cargo clippy --all-targets --all-features -- -D warnings
+cargo build --release
+powershell -File scripts/build-portable.ps1
 ```
 
 MIT licensed.
